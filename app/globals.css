@@ -1,0 +1,155 @@
+@import "tailwindcss";
+
+/* ============================================================
+   FollowUp AI design system
+   One source of truth. No component hardcodes a hex value.
+   Light-only by design: a half-finished dark theme reads worse
+   than none, so the v1 auto dark-mode block is deliberately gone.
+   ============================================================ */
+
+@theme {
+  /* Surfaces — warm neutral, never a flat black canvas */
+  --color-canvas: #faf9f7;
+  --color-card: #ffffff;
+  --color-sunken: #f5f4f1;
+  --color-line: #e7e5e1;
+  --color-line-soft: #f0eeea;
+
+  /* Text */
+  --color-ink: #1c1917;
+  --color-ink-2: #57534e;
+  --color-ink-3: #8f8a83;
+
+  /* Brand — indigo for actions and navigation */
+  --color-brand: #4f46e5;
+  --color-brand-hover: #4338ca;
+  --color-brand-tint: #eef2ff;
+  --color-brand-line: #c7d2fe;
+
+  /* AI accent — violet, reserved for machine-authored content */
+  --color-ai: #7c3aed;
+  --color-ai-tint: #f5f3ff;
+  --color-ai-line: #ddd6fe;
+
+  /* Semantic */
+  --color-positive: #047857;
+  --color-positive-tint: #ecfdf5;
+  --color-positive-line: #a7f3d0;
+  --color-attention: #b45309;
+  --color-attention-tint: #fffbeb;
+  --color-attention-line: #fde68a;
+  --color-risk: #be123c;
+  --color-risk-tint: #fff1f2;
+  --color-risk-line: #fecdd3;
+
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+
+  --radius-card: 10px;
+  --radius-control: 7px;
+
+  --shadow-card: 0 1px 2px rgba(28, 25, 23, 0.05);
+  --shadow-raised: 0 2px 8px rgba(28, 25, 23, 0.08), 0 1px 2px rgba(28, 25, 23, 0.04);
+  --shadow-overlay: 0 16px 48px rgba(28, 25, 23, 0.16), 0 2px 8px rgba(28, 25, 23, 0.08);
+}
+
+html {
+  color-scheme: light;
+}
+
+body {
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---------- Typography scale ----------
+   Six deliberate steps. Nothing in the app should invent a seventh. */
+.t-display { font-size: 1.75rem; line-height: 2.125rem; font-weight: 600; letter-spacing: -0.02em; }
+.t-h1      { font-size: 1.25rem; line-height: 1.75rem;  font-weight: 600; letter-spacing: -0.011em; }
+.t-h2      { font-size: 1rem;    line-height: 1.5rem;   font-weight: 600; }
+.t-body    { font-size: 0.875rem; line-height: 1.375rem; }
+.t-meta    { font-size: 0.8125rem; line-height: 1.25rem; color: var(--color-ink-2); }
+.t-label   { font-size: 0.6875rem; line-height: 1rem; font-weight: 600;
+             letter-spacing: 0.06em; text-transform: uppercase; color: var(--color-ink-3); }
+.tabular   { font-variant-numeric: tabular-nums; }
+
+/* ---------- Primitives ---------- */
+.card {
+  background: var(--color-card);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-card);
+}
+
+.card-interactive {
+  transition: box-shadow 120ms ease, border-color 120ms ease, transform 120ms ease;
+}
+.card-interactive:hover {
+  box-shadow: var(--shadow-raised);
+  border-color: #dcd9d3;
+}
+
+/* AI-authored content is always visually marked. The rep must never have to
+   guess whether a sentence came from a person or from the model. */
+.ai-block {
+  background: var(--color-ai-tint);
+  border: 1px solid var(--color-ai-line);
+  border-radius: 8px;
+  color: #4c1d95;
+}
+
+.focus-ring:focus-visible {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 2px;
+}
+
+kbd {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  padding: 1px 5px;
+  border: 1px solid var(--color-line);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--color-card);
+  color: var(--color-ink-3);
+}
+
+/* ---------- Motion ---------- */
+@keyframes fu-fade-up {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: none; }
+}
+.anim-in { animation: fu-fade-up 180ms ease-out both; }
+
+@keyframes fu-shimmer {
+  0%   { opacity: 0.45; }
+  50%  { opacity: 1; }
+  100% { opacity: 0.45; }
+}
+.anim-thinking { animation: fu-shimmer 1.2s ease-in-out infinite; }
+
+@keyframes fu-slide-in {
+  from { opacity: 0; transform: translateX(12px); }
+  to   { opacity: 1; transform: none; }
+}
+.anim-drawer { animation: fu-slide-in 240ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+@keyframes fu-collapse {
+  to { opacity: 0; transform: translateX(24px); max-height: 0; margin: 0; padding: 0; }
+}
+.anim-dismiss { animation: fu-collapse 220ms ease-in forwards; overflow: hidden; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Scrollbars stay quiet inside panels */
+.thin-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
+.thin-scroll::-webkit-scrollbar-thumb { background: #dcd9d3; border-radius: 4px; }
+.thin-scroll::-webkit-scrollbar-track { background: transparent; }
