@@ -3,17 +3,29 @@ import { PageHeader } from "@/components/ui";
 import { listOpportunities } from "@/lib/repo/opportunities";
 import { STAGES, STAGE_LABEL } from "@/lib/types";
 import { money, moneyShort } from "@/lib/format";
+import { today } from "@/lib/dates";
 
 export const dynamic = "force-dynamic";
 
-export default function AnalyticsPage() {
-  const opportunities = listOpportunities();
-  const open = opportunities.filter((o) => o.stage !== "won" && o.stage !== "lost");
+export default async function AnalyticsPage() {
+  // COUNT() arrives as a bigint string from the driver, so every aggregate is
+  // cast; `due_date` is a 'YYYY-MM-DD' text column, so today is passed in as a
+  // parameter rather than compared against now().
+  const [opportunities, keptRow, missedRow, byChannel] = await Promise.all([
+    listOpportunities(),
+    db.get<{ n: number }>("SELECT COUNT(*)::int n FROM commitments WHERE owner='me' AND status='done'"),
+    db.get<{ n: number }>(
+      "SELECT COUNT(*)::int n FROM commitments WHERE owner='me' AND status IN ('open','snoozed') AND due_date < ?",
+      today(),
+    ),
+    db.all<{ type: string; n: number }>(
+      "SELECT type, COUNT(*)::int n FROM interactions GROUP BY type ORDER BY n DESC",
+    ),
+  ]);
 
-  const kept = (db.prepare("SELECT COUNT(*) n FROM commitments WHERE owner='me' AND status='done'").get() as { n: number }).n;
-  const missed = (
-    db.prepare("SELECT COUNT(*) n FROM commitments WHERE owner='me' AND status IN ('open','snoozed') AND due_date < date('now')").get() as { n: number }
-  ).n;
+  const open = opportunities.filter((o) => o.stage !== "won" && o.stage !== "lost");
+  const kept = keptRow?.n ?? 0;
+  const missed = missedRow?.n ?? 0;
   const complianceRate = kept + missed > 0 ? Math.round((kept / (kept + missed)) * 100) : 100;
 
   const won = opportunities.filter((o) => o.stage === "won");
@@ -26,9 +38,6 @@ export default function AnalyticsPage() {
   });
   const maxValue = Math.max(1, ...byStage.map((b) => b.value));
 
-  const byChannel = db
-    .prepare("SELECT type, COUNT(*) n FROM interactions GROUP BY type ORDER BY n DESC")
-    .all() as { type: string; n: number }[];
   const maxChannel = Math.max(1, ...byChannel.map((c) => c.n));
 
   return (

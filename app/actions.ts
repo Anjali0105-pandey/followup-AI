@@ -24,27 +24,27 @@ function refresh(...paths: string[]) {
 /* ---------- Commitments / follow-ups ---------- */
 
 export async function completeCommitmentAction(id: number) {
-  C.completeCommitment(id);
+  await C.completeCommitment(id);
   refresh();
 }
 
 export async function reopenCommitmentAction(id: number) {
-  C.reopenCommitment(id);
+  await C.reopenCommitment(id);
   refresh();
 }
 
 export async function snoozeCommitmentAction(id: number, days: number) {
-  C.snoozeCommitment(id, days);
+  await C.snoozeCommitment(id, days);
   refresh();
 }
 
 export async function rescheduleCommitmentAction(id: number, date: string) {
-  C.rescheduleCommitment(id, date);
+  await C.rescheduleCommitment(id, date);
   refresh();
 }
 
 export async function deleteCommitmentAction(id: number) {
-  C.deleteCommitment(id);
+  await C.deleteCommitment(id);
   refresh();
 }
 
@@ -56,9 +56,9 @@ export async function createCommitmentAction(input: {
   detail?: string;
   dueDate: string;
 }) {
-  C.createCommitment({
+  await C.createCommitment({
     ...input,
-    opportunityId: O.primaryOpportunityFor(input.customerId),
+    opportunityId: await O.primaryOpportunityFor(input.customerId),
     source: "manual",
   });
   refresh();
@@ -67,18 +67,19 @@ export async function createCommitmentAction(input: {
 /* ---------- Pipeline ---------- */
 
 export async function moveStageAction(id: number, stage: Stage) {
-  O.moveStage(id, stage);
+  await O.moveStage(id, stage);
   refresh();
 }
 
 /* ---------- Signals ---------- */
 
 export async function resolveSignalAction(id: number) {
-  const row = db.prepare("SELECT opportunity_id FROM signals WHERE id = ?").get(id) as
-    | { opportunity_id: number | null }
-    | undefined;
-  I.resolveSignal(id);
-  if (row?.opportunity_id) O.rescoreOpportunity(row.opportunity_id);
+  const row = await db.get<{ opportunity_id: number | null }>(
+    "SELECT opportunity_id FROM signals WHERE id = ?",
+    id,
+  );
+  await I.resolveSignal(id);
+  if (row?.opportunity_id) await O.rescoreOpportunity(row.opportunity_id);
   refresh();
 }
 
@@ -106,37 +107,39 @@ export interface DraftResult {
  * draft. Showing the rep what the AI was given is a trust feature: a draft you
  * cannot audit is a draft you cannot send.
  */
-function buildContext(customerIdInput: number | null, commitmentId: number | null) {
-  const commitment = commitmentId ? C.getCommitment(commitmentId) : null;
+async function buildContext(customerIdInput: number | null, commitmentId: number | null) {
+  const commitment = commitmentId ? await C.getCommitment(commitmentId) : null;
   // A caller that knows only the commitment (the Ask palette, a keyboard
   // shortcut on a feed card) shouldn't have to look the account up first.
   const customerId = customerIdInput || commitment?.customer_id || 0;
-  const customer = getCustomer(customerId);
+  const customer = await getCustomer(customerId);
   if (!customer) throw new Error("Customer not found");
 
-  const contacts = listContacts(customerId);
+  const [contacts, allSignals, lastMeeting, user] = await Promise.all([
+    listContacts(customerId),
+    listSignals(customerId),
+    db.get<{ ai_summary: string | null; subject: string }>(
+      `SELECT ai_summary, subject FROM interactions
+       WHERE customer_id = ? AND type IN ('meeting','call') ORDER BY occurred_at DESC LIMIT 1`,
+      customerId,
+    ),
+    currentUser(),
+  ]);
+
   const contact = commitment?.contact_name
     ? contacts.find((c) => c.name === commitment.contact_name) ?? contacts[0]
     : contacts.find((c) => c.is_decision_maker) ?? contacts[0];
 
-  const signals = listSignals(customerId).filter((s) => !s.resolved_at);
-  const lastMeeting = db
-    .prepare(
-      `SELECT ai_summary, subject FROM interactions
-       WHERE customer_id = ? AND type IN ('meeting','call') ORDER BY occurred_at DESC LIMIT 1`,
-    )
-    .get(customerId) as { ai_summary: string | null; subject: string } | undefined;
+  const signals = allSignals.filter((s) => !s.resolved_at);
 
-  const opportunity = commitment?.opportunity_id
-    ? O.getOpportunity(commitment.opportunity_id)
-    : (() => {
-        const oid = O.primaryOpportunityFor(customerId);
-        return oid ? O.getOpportunity(oid) : null;
-      })();
+  const opportunity = await (async () => {
+    if (commitment?.opportunity_id) return O.getOpportunity(commitment.opportunity_id);
+    const oid = await O.primaryOpportunityFor(customerId);
+    return oid ? O.getOpportunity(oid) : null;
+  })();
 
   const concerns = signals.filter((s) => s.kind === "objection" || s.kind === "risk").map((s) => s.label);
   const openQuestions = signals.filter((s) => s.kind === "question").map((s) => s.label);
-  const user = currentUser();
 
   return {
     customerId,
@@ -173,7 +176,7 @@ export async function generateDraftAction(
   commitmentId: number | null,
   channel: MessageChannel,
 ): Promise<DraftResult> {
-  const ctx = buildContext(customerId, commitmentId);
+  const ctx = await buildContext(customerId, commitmentId);
   const body = await generateMessage(channel, ctx.ai);
   return { body, context: { ...ctx.display, customerId: ctx.customerId } };
 }
@@ -189,14 +192,19 @@ export async function markSentAction(input: {
   channel: string;
   body: string;
 }) {
-  db.prepare(
-    "INSERT INTO generated_messages (commitment_id, customer_id, channel, body, sent_at) VALUES (?, ?, ?, ?, datetime('now'))",
-  ).run(input.commitmentId, input.customerId, input.channel, input.body);
+  await db.run(
+    `INSERT INTO generated_messages (commitment_id, customer_id, channel, body, sent_at)
+     VALUES (?, ?, ?, ?, to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD HH24:MI:SS'))`,
+    input.commitmentId,
+    input.customerId,
+    input.channel,
+    input.body,
+  );
 
   const subjectLine = input.body.match(/^Subject:\s*(.+)$/m)?.[1];
-  I.createInteraction({
+  await I.createInteraction({
     customerId: input.customerId,
-    opportunityId: O.primaryOpportunityFor(input.customerId),
+    opportunityId: await O.primaryOpportunityFor(input.customerId),
     type: input.channel === "call_script" ? "call" : (input.channel as "email" | "whatsapp" | "linkedin"),
     direction: "outbound",
     occurredAt: today(),
@@ -204,7 +212,7 @@ export async function markSentAction(input: {
     body: input.body,
   });
 
-  if (input.commitmentId) C.completeCommitment(input.commitmentId);
+  if (input.commitmentId) await C.completeCommitment(input.commitmentId);
   refresh();
 }
 
@@ -225,18 +233,18 @@ export async function logMeetingAction(input: {
   notes: string;
   transcript: string;
 }): Promise<MeetingResult> {
-  let customer = getCustomerByName(input.customerName);
+  let customer = await getCustomerByName(input.customerName);
   if (!customer) {
-    const id = createCustomer({ name: input.customerName, company: input.company || input.customerName });
-    customer = getCustomer(id)!;
+    const id = await createCustomer({ name: input.customerName, company: input.company || input.customerName });
+    customer = (await getCustomer(id))!;
   }
 
   const extraction = await extractMeeting(input.transcript, input.notes, customer.facts);
-  const opportunityId = O.primaryOpportunityFor(customer.id);
-  const contacts = listContacts(customer.id);
+  const opportunityId = await O.primaryOpportunityFor(customer.id);
+  const contacts = await listContacts(customer.id);
   const contactId = contacts.find((c) => c.is_decision_maker)?.id ?? contacts[0]?.id ?? null;
 
-  const interactionId = I.createInteraction({
+  const interactionId = await I.createInteraction({
     customerId: customer.id,
     opportunityId,
     contactId,
@@ -250,7 +258,7 @@ export async function logMeetingAction(input: {
   });
 
   for (const s of extraction.signals) {
-    I.createSignal({
+    await I.createSignal({
       customerId: customer.id,
       opportunityId,
       interactionId,
@@ -261,8 +269,8 @@ export async function logMeetingAction(input: {
     });
   }
 
-  updateCustomerFacts(customer.id, extraction.updated_facts, extraction.summary);
-  if (opportunityId) O.rescoreOpportunity(opportunityId);
+  await updateCustomerFacts(customer.id, extraction.updated_facts, extraction.summary);
+  if (opportunityId) await O.rescoreOpportunity(opportunityId);
   refresh();
 
   return { interactionId, customerId: customer.id, extraction };
@@ -282,12 +290,12 @@ export async function createExtractedCommitmentsAction(input: {
   meetingDate: string;
   commitments: { owner: "me" | "customer"; kind: CommitmentKind; title: string; detail?: string; dueInDays: number }[];
 }) {
-  const opportunityId = O.primaryOpportunityFor(input.customerId);
-  const contacts = listContacts(input.customerId);
+  const opportunityId = await O.primaryOpportunityFor(input.customerId);
+  const contacts = await listContacts(input.customerId);
   const contactId = contacts.find((c) => c.is_decision_maker)?.id ?? contacts[0]?.id ?? null;
 
   for (const c of input.commitments) {
-    C.createCommitment({
+    await C.createCommitment({
       customerId: input.customerId,
       opportunityId,
       contactId,
@@ -300,7 +308,7 @@ export async function createExtractedCommitmentsAction(input: {
       source: "ai_extracted",
     });
   }
-  if (opportunityId) O.rescoreOpportunity(opportunityId);
+  if (opportunityId) await O.rescoreOpportunity(opportunityId);
   refresh();
 }
 
@@ -313,6 +321,6 @@ export async function askAction(question: string): Promise<AskResult> {
 /* ---------- Demo data ---------- */
 
 export async function reseedAction() {
-  seed();
+  await seed();
   refresh();
 }

@@ -16,103 +16,111 @@ export interface CustomerListItem extends Customer {
 
 const BAND_RANK = `CASE o.priority_band WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END`;
 
-export function listCustomers(): CustomerListItem[] {
-  const rows = db
-    .prepare(
-      `SELECT c.*,
-              ct.name  AS primary_contact,
-              ct.role  AS contact_role,
-              COALESCE(agg.open_value, 0) AS open_value,
-              agg.best_stage,
-              COALESCE(agg.band, 'low')   AS priority_band,
-              COALESCE(agg.score, 0)      AS priority_score,
-              agg.last_interaction_at,
-              COALESCE(cm.open_commitments, 0) AS open_commitments,
-              cm.next_due
-       FROM customers c
-       LEFT JOIN (
-         SELECT o.customer_id,
-                SUM(CASE WHEN o.stage NOT IN ('won','lost') THEN o.value ELSE 0 END) AS open_value,
-                MAX(o.last_interaction_at) AS last_interaction_at,
-                MAX(o.priority_score)      AS score,
-                (SELECT priority_band FROM opportunities x WHERE x.customer_id = o.customer_id
-                  ORDER BY ${BAND_RANK.replace(/o\./g, "x.")}, x.priority_score DESC LIMIT 1) AS band,
-                (SELECT stage FROM opportunities x WHERE x.customer_id = o.customer_id
-                  AND x.stage NOT IN ('won','lost') ORDER BY x.value DESC LIMIT 1) AS best_stage
-         FROM opportunities o GROUP BY o.customer_id
-       ) agg ON agg.customer_id = c.id
-       LEFT JOIN (
-         SELECT customer_id, COUNT(*) AS open_commitments, MIN(due_date) AS next_due
-         FROM commitments WHERE owner = 'me' AND status IN ('open','snoozed')
-         GROUP BY customer_id
-       ) cm ON cm.customer_id = c.id
-       LEFT JOIN contacts ct ON ct.customer_id = c.id AND ct.is_decision_maker = 1
-       GROUP BY c.id
-       ORDER BY COALESCE(agg.score, 0) DESC`,
-    )
-    .all() as Record<string, unknown>[];
+export async function listCustomers(): Promise<CustomerListItem[]> {
+  /* The decision-maker contact is pulled with scalar subqueries rather than a
+     join: a customer can have more than one, and Postgres will not let a bare
+     GROUP BY c.id collapse the duplicates the way SQLite did. */
+  const rows = await db.all(
+    `SELECT c.*,
+            (SELECT name FROM contacts ct WHERE ct.customer_id = c.id AND ct.is_decision_maker = 1
+              ORDER BY ct.id LIMIT 1) AS primary_contact,
+            (SELECT role FROM contacts ct WHERE ct.customer_id = c.id AND ct.is_decision_maker = 1
+              ORDER BY ct.id LIMIT 1) AS contact_role,
+            COALESCE(agg.open_value, 0) AS open_value,
+            agg.best_stage,
+            COALESCE(agg.band, 'low')   AS priority_band,
+            COALESCE(agg.score, 0)      AS priority_score,
+            agg.last_interaction_at,
+            COALESCE(cm.open_commitments, 0) AS open_commitments,
+            cm.next_due
+     FROM customers c
+     LEFT JOIN (
+       SELECT o.customer_id,
+              SUM(CASE WHEN o.stage NOT IN ('won','lost') THEN o.value ELSE 0 END) AS open_value,
+              MAX(o.last_interaction_at) AS last_interaction_at,
+              MAX(o.priority_score)      AS score,
+              (SELECT priority_band FROM opportunities x WHERE x.customer_id = o.customer_id
+                ORDER BY ${BAND_RANK.replace(/o\./g, "x.")}, x.priority_score DESC LIMIT 1) AS band,
+              (SELECT stage FROM opportunities x WHERE x.customer_id = o.customer_id
+                AND x.stage NOT IN ('won','lost') ORDER BY x.value DESC LIMIT 1) AS best_stage
+       FROM opportunities o GROUP BY o.customer_id
+     ) agg ON agg.customer_id = c.id
+     LEFT JOIN (
+       SELECT customer_id, COUNT(*)::int AS open_commitments, MIN(due_date) AS next_due
+       FROM commitments WHERE owner = 'me' AND status IN ('open','snoozed')
+       GROUP BY customer_id
+     ) cm ON cm.customer_id = c.id
+     ORDER BY COALESCE(agg.score, 0) DESC`,
+  );
 
   return rows.map((r) => ({ ...toCustomer(r), ...r } as unknown as CustomerListItem));
 }
 
-export function getCustomer(id: number): Customer | null {
-  const row = db.prepare("SELECT * FROM customers WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+export async function getCustomer(id: number): Promise<Customer | null> {
+  const row = await db.get("SELECT * FROM customers WHERE id = ?", id);
   return row ? toCustomer(row) : null;
 }
 
-export function getCustomerByName(name: string): Customer | null {
-  const row = db.prepare("SELECT * FROM customers WHERE name = ? OR company = ?").get(name, name) as
-    | Record<string, unknown>
-    | undefined;
+export async function getCustomerByName(name: string): Promise<Customer | null> {
+  const row = await db.get("SELECT * FROM customers WHERE name = ? OR company = ?", name, name);
   return row ? toCustomer(row) : null;
 }
 
-export function listContacts(customerId: number): Contact[] {
-  return (
-    db
-      .prepare("SELECT * FROM contacts WHERE customer_id = ? ORDER BY is_decision_maker DESC, name")
-      .all(customerId) as Record<string, unknown>[]
-  ).map(toContact);
+export async function listContacts(customerId: number): Promise<Contact[]> {
+  const rows = await db.all(
+    "SELECT * FROM contacts WHERE customer_id = ? ORDER BY is_decision_maker DESC, name",
+    customerId,
+  );
+  return rows.map(toContact);
 }
 
-export function listOpportunitiesFor(customerId: number): Opportunity[] {
-  return (
-    db
-      .prepare("SELECT * FROM opportunities WHERE customer_id = ? ORDER BY value DESC")
-      .all(customerId) as Record<string, unknown>[]
-  ).map(toOpportunity);
+export async function listOpportunitiesFor(customerId: number): Promise<Opportunity[]> {
+  const rows = await db.all("SELECT * FROM opportunities WHERE customer_id = ? ORDER BY value DESC", customerId);
+  return rows.map(toOpportunity);
 }
 
-export function listInteractions(customerId: number, limit = 100): Interaction[] {
-  return (
-    db
-      .prepare("SELECT * FROM interactions WHERE customer_id = ? ORDER BY occurred_at DESC, id DESC LIMIT ?")
-      .all(customerId, limit) as Record<string, unknown>[]
-  ).map(toInteraction);
+export async function listInteractions(customerId: number, limit = 100): Promise<Interaction[]> {
+  const rows = await db.all(
+    "SELECT * FROM interactions WHERE customer_id = ? ORDER BY occurred_at DESC, id DESC LIMIT ?",
+    customerId,
+    limit,
+  );
+  return rows.map(toInteraction);
 }
 
-export function listSignals(customerId: number): Signal[] {
-  return (
-    db
-      .prepare("SELECT * FROM signals WHERE customer_id = ? ORDER BY created_at DESC")
-      .all(customerId) as Record<string, unknown>[]
-  ).map(toSignal);
+export async function listSignals(customerId: number): Promise<Signal[]> {
+  const rows = await db.all("SELECT * FROM signals WHERE customer_id = ? ORDER BY created_at DESC", customerId);
+  return rows.map(toSignal);
 }
 
-export function createCustomer(input: { name: string; company: string; workspaceId?: number }): number {
+export async function createCustomer(input: {
+  name: string;
+  company: string;
+  workspaceId?: number;
+}): Promise<number> {
   const ws =
     input.workspaceId ??
-    ((db.prepare("SELECT id FROM workspaces ORDER BY id LIMIT 1").get() as { id: number } | undefined)?.id ?? 1);
-  const info = db
-    .prepare("INSERT INTO customers (workspace_id, name, company) VALUES (?, ?, ?)")
-    .run(ws, input.name, input.company);
-  return Number(info.lastInsertRowid);
+    (await db.get<{ id: number }>("SELECT id FROM workspaces ORDER BY id LIMIT 1"))?.id ??
+    1;
+  return db.insert(
+    "INSERT INTO customers (workspace_id, name, company) VALUES (?, ?, ?) RETURNING id",
+    ws,
+    input.name,
+    input.company,
+  );
 }
 
-export function updateCustomerFacts(customerId: number, facts: Record<string, string>, aiSummary?: string) {
-  const existing = getCustomer(customerId);
+export async function updateCustomerFacts(
+  customerId: number,
+  facts: Record<string, string>,
+  aiSummary?: string,
+) {
+  const existing = await getCustomer(customerId);
   const merged = { ...(existing?.facts ?? {}), ...facts };
-  db.prepare(
-    `UPDATE customers SET facts = ?, ai_summary = COALESCE(?, ai_summary), updated_at = datetime('now') WHERE id = ?`,
-  ).run(JSON.stringify(merged), aiSummary ?? null, customerId);
+  await db.run(
+    `UPDATE customers SET facts = ?, ai_summary = COALESCE(?, ai_summary), updated_at = now() WHERE id = ?`,
+    JSON.stringify(merged),
+    aiSummary ?? null,
+    customerId,
+  );
 }

@@ -18,8 +18,8 @@ const ORDER: InsightCategory[] = [
   "buying_signal",
 ];
 
-export default function InsightsPage() {
-  const insights = computeInsights();
+export default async function InsightsPage() {
+  const insights = await computeInsights();
 
   // The headline is generated from what is actually true today, not a template.
   const headlines = [

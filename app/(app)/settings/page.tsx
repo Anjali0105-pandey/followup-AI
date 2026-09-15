@@ -7,14 +7,17 @@ import db from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
-export default function SettingsPage() {
-  const user = currentUser();
-  const counts = db
-    .prepare(
-      `SELECT (SELECT COUNT(*) FROM customers) c, (SELECT COUNT(*) FROM opportunities) o,
-              (SELECT COUNT(*) FROM commitments) m, (SELECT COUNT(*) FROM interactions) i`,
-    )
-    .get() as { c: number; o: number; m: number; i: number };
+export default async function SettingsPage() {
+  // Postgres hands COUNT() back as a bigint string, so each one is cast to int
+  // — otherwise these render as strings and any arithmetic on them concatenates.
+  const [user, counts] = await Promise.all([
+    currentUser(),
+    db.get<{ c: number; o: number; m: number; i: number }>(
+      `SELECT (SELECT COUNT(*) FROM customers)::int c, (SELECT COUNT(*) FROM opportunities)::int o,
+              (SELECT COUNT(*) FROM commitments)::int m, (SELECT COUNT(*) FROM interactions)::int i`,
+    ),
+  ]);
+  const { c = 0, o = 0, m = 0, i = 0 } = counts ?? {};
 
   return (
     <>
@@ -94,7 +97,7 @@ export default function SettingsPage() {
           <SectionTitle>Demo data</SectionTitle>
           <div className="card p-4">
             <p className="text-[13px] leading-6 text-ink-2">
-              This workspace holds {counts.c} customers, {counts.o} opportunities, {counts.i} interactions and {counts.m}{" "}
+              This workspace holds {c} customers, {o} opportunities, {i} interactions and {m}{" "}
               commitments. Dates are relative to today, so the demo never goes stale. Resetting discards anything you
               changed and rebuilds the original dataset.
             </p>

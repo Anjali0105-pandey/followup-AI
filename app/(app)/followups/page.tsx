@@ -33,17 +33,22 @@ export default async function FollowUpsPage(props: PageProps<"/followups">) {
     search: one("q") || undefined,
   };
 
-  const items = listCommitments(filter);
-  const customers = listCustomers().map((c) => ({ id: c.id, company: c.company }));
-
   // Tab counts respect the active filters, so the numbers always match what a
-  // click would actually show.
-  const counts = Object.fromEntries(
-    TABS.map((t) => [
-      t.key,
-      listCommitments({ ...filter, tab: t.key, owner: t.key === "waiting" ? undefined : "me" }).length,
-    ]),
-  );
+  // click would actually show. Every query here is independent, so they all go
+  // out at once rather than as a chain of round-trips to a remote database.
+  const [items, allCustomers, countEntries] = await Promise.all([
+    listCommitments(filter),
+    listCustomers(),
+    Promise.all(
+      TABS.map(async (t) => [
+        t.key,
+        (await listCommitments({ ...filter, tab: t.key, owner: t.key === "waiting" ? undefined : "me" })).length,
+      ]),
+    ),
+  ]);
+
+  const customers = allCustomers.map((c) => ({ id: c.id, company: c.company }));
+  const counts = Object.fromEntries(countEntries);
 
   return (
     <>

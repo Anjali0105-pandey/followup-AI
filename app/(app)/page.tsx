@@ -42,18 +42,22 @@ const INSIGHT_TONE: Record<string, "risk" | "attention" | "positive" | "ai"> = {
   at_risk: "risk",
 };
 
-export default function CommandCenter() {
-  const user = currentUser();
-  const counts = headlineCounts();
-  const feed = priorityFeed(8);
-  const insights = computeInsights();
-  const opportunities = listOpportunities();
+export default async function CommandCenter() {
   const t = today();
 
-  const upcoming = listCommitments({ owner: "me", tab: "upcoming" });
-  const waiting = listCommitments({ owner: "customer", tab: "waiting" });
-  const todayItems = listCommitments({ owner: "me", tab: "today" });
-  const overdueItems = listCommitments({ owner: "me", tab: "overdue" });
+  // One round of parallel reads rather than ten sequential trips to Neon.
+  const [user, counts, feed, insights, opportunities, upcoming, waiting, todayItems, overdueItems] =
+    await Promise.all([
+      currentUser(),
+      headlineCounts(),
+      priorityFeed(8),
+      computeInsights(),
+      listOpportunities(),
+      listCommitments({ owner: "me", tab: "upcoming" }),
+      listCommitments({ owner: "customer", tab: "waiting" }),
+      listCommitments({ owner: "me", tab: "today" }),
+      listCommitments({ owner: "me", tab: "overdue" }),
+    ]);
 
   const hot = opportunities
     .filter((o) => o.stage !== "won" && o.stage !== "lost")

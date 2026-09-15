@@ -20,11 +20,14 @@ const SIGNAL_TONE: Record<string, "positive" | "risk" | "attention" | "neutral">
 
 export default async function MeetingDetail(props: PageProps<"/meetings/[id]">) {
   const { id } = await props.params;
-  const meeting = getInteraction(Number(id));
+  const meeting = await getInteraction(Number(id));
   if (!meeting) notFound();
 
-  const signals = signalsForInteraction(meeting.id);
-  const created = listCommitmentsForCustomer(meeting.customer_id).filter((c) => c.interaction_id === meeting.id);
+  const [signals, customerCommitments] = await Promise.all([
+    signalsForInteraction(meeting.id),
+    listCommitmentsForCustomer(meeting.customer_id),
+  ]);
+  const created = customerCommitments.filter((c) => c.interaction_id === meeting.id);
 
   return (
     <>

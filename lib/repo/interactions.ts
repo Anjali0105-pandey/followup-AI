@@ -10,33 +10,29 @@ export interface MeetingListItem extends Interaction {
   signal_count: number;
 }
 
-export function listMeetings(): MeetingListItem[] {
-  return (
-    db
-      .prepare(
-        `SELECT i.*, c.name AS customer_name, c.company,
-                (SELECT COUNT(*) FROM commitments cm WHERE cm.interaction_id = i.id) AS actions_created,
-                (SELECT COUNT(*) FROM signals s WHERE s.interaction_id = i.id) AS signal_count
-         FROM interactions i JOIN customers c ON c.id = i.customer_id
-         WHERE i.type = 'meeting'
-         ORDER BY i.occurred_at DESC`,
-      )
-      .all() as Record<string, unknown>[]
-  ).map((r) => ({ ...toInteraction(r), ...r } as unknown as MeetingListItem));
+export async function listMeetings(): Promise<MeetingListItem[]> {
+  const rows = await db.all(
+    `SELECT i.*, c.name AS customer_name, c.company,
+            (SELECT COUNT(*)::int FROM commitments cm WHERE cm.interaction_id = i.id) AS actions_created,
+            (SELECT COUNT(*)::int FROM signals s WHERE s.interaction_id = i.id) AS signal_count
+     FROM interactions i JOIN customers c ON c.id = i.customer_id
+     WHERE i.type = 'meeting'
+     ORDER BY i.occurred_at DESC`,
+  );
+  return rows.map((r) => ({ ...toInteraction(r), ...r } as unknown as MeetingListItem));
 }
 
-export function getInteraction(id: number) {
-  const row = db
-    .prepare(
-      `SELECT i.*, c.name AS customer_name, c.company
-       FROM interactions i JOIN customers c ON c.id = i.customer_id WHERE i.id = ?`,
-    )
-    .get(id) as Record<string, unknown> | undefined;
+export async function getInteraction(id: number) {
+  const row = await db.get(
+    `SELECT i.*, c.name AS customer_name, c.company
+     FROM interactions i JOIN customers c ON c.id = i.customer_id WHERE i.id = ?`,
+    id,
+  );
   if (!row) return null;
   return { ...toInteraction(row), customer_name: row.customer_name as string, company: row.company as string };
 }
 
-export function createInteraction(input: {
+export async function createInteraction(input: {
   customerId: number;
   opportunityId?: number | null;
   contactId?: number | null;
@@ -47,31 +43,29 @@ export function createInteraction(input: {
   body?: string | null;
   transcript?: string | null;
   aiSummary?: string | null;
-}): number {
-  const info = db
-    .prepare(
-      `INSERT INTO interactions
-         (customer_id, opportunity_id, contact_id, type, direction, occurred_at, subject, body, transcript, ai_summary, ai_processed_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
-      input.customerId,
-      input.opportunityId ?? null,
-      input.contactId ?? null,
-      input.type,
-      input.direction ?? "outbound",
-      input.occurredAt,
-      input.subject,
-      input.body ?? null,
-      input.transcript ?? null,
-      input.aiSummary ?? null,
-      input.aiSummary ? new Date().toISOString() : null,
-    );
-  if (input.opportunityId) rescoreOpportunity(input.opportunityId);
-  return Number(info.lastInsertRowid);
+}): Promise<number> {
+  const id = await db.insert(
+    `INSERT INTO interactions
+       (customer_id, opportunity_id, contact_id, type, direction, occurred_at, subject, body, transcript, ai_summary, ai_processed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     RETURNING id`,
+    input.customerId,
+    input.opportunityId ?? null,
+    input.contactId ?? null,
+    input.type,
+    input.direction ?? "outbound",
+    input.occurredAt,
+    input.subject,
+    input.body ?? null,
+    input.transcript ?? null,
+    input.aiSummary ?? null,
+    input.aiSummary ? new Date().toISOString() : null,
+  );
+  if (input.opportunityId) await rescoreOpportunity(input.opportunityId);
+  return id;
 }
 
-export function createSignal(input: {
+export async function createSignal(input: {
   customerId: number;
   opportunityId?: number | null;
   interactionId?: number | null;
@@ -79,28 +73,28 @@ export function createSignal(input: {
   label: string;
   detail?: string | null;
   strength?: number;
-}): number {
-  const info = db
-    .prepare(
-      `INSERT INTO signals (customer_id, opportunity_id, interaction_id, kind, label, detail, strength)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
-      input.customerId,
-      input.opportunityId ?? null,
-      input.interactionId ?? null,
-      input.kind,
-      input.label,
-      input.detail ?? null,
-      input.strength ?? 2,
-    );
-  return Number(info.lastInsertRowid);
+}): Promise<number> {
+  return db.insert(
+    `INSERT INTO signals (customer_id, opportunity_id, interaction_id, kind, label, detail, strength)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     RETURNING id`,
+    input.customerId,
+    input.opportunityId ?? null,
+    input.interactionId ?? null,
+    input.kind,
+    input.label,
+    input.detail ?? null,
+    input.strength ?? 2,
+  );
 }
 
-export function resolveSignal(id: number) {
-  db.prepare("UPDATE signals SET resolved_at = datetime('now') WHERE id = ?").run(id);
+export async function resolveSignal(id: number) {
+  await db.run(
+    `UPDATE signals SET resolved_at = to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD HH24:MI:SS') WHERE id = ?`,
+    id,
+  );
 }
 
-export function signalsForInteraction(interactionId: number) {
-  return db.prepare("SELECT * FROM signals WHERE interaction_id = ?").all(interactionId) as Record<string, unknown>[];
+export async function signalsForInteraction(interactionId: number) {
+  return db.all("SELECT * FROM signals WHERE interaction_id = ?", interactionId);
 }

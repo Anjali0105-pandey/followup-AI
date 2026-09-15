@@ -1,10 +1,11 @@
 import "server-only";
 import db from "@/lib/db";
 import type { AskResult, AskResultItem } from "@/lib/ask-shared";
+import type { CommitmentView } from "@/lib/types";
 import { answerQuestion } from "@/lib/ai";
 import { listCommitments, priorityFeed } from "@/lib/repo/commitments";
 import { computeInsights } from "@/lib/repo/insights";
-import { getCustomerByName, listInteractions, listSignals } from "@/lib/repo/customers";
+import { getCustomer, getCustomerByName, listInteractions, listSignals } from "@/lib/repo/customers";
 import { moneyShort } from "@/lib/format";
 import { relativeDue, relativePast, today } from "@/lib/dates";
 
@@ -15,11 +16,11 @@ import { relativeDue, relativePast, today } from "@/lib/dates";
  * questions fall through to the model.
  */
 
-type Handler = (q: string) => AskResult | null;
+type Handler = (q: string) => Promise<AskResult | null>;
 
 const has = (q: string, ...words: string[]) => words.some((w) => q.includes(w));
 
-function commitmentItems(rows: ReturnType<typeof listCommitments>): AskResultItem[] {
+function commitmentItems(rows: CommitmentView[]): AskResultItem[] {
   return rows.map((c) => ({
     title: c.title,
     subtitle: `${c.company}${c.opportunity_value ? ` · ${moneyShort(c.opportunity_value)}` : ""}`,
@@ -34,9 +35,9 @@ function commitmentItems(rows: ReturnType<typeof listCommitments>): AskResultIte
 
 const HANDLERS: Handler[] = [
   // "Who should I follow up with today?"
-  (q) => {
+  async (q) => {
     if (!has(q, "follow up", "followup", "who should i", "what should i do", "priorit", "today")) return null;
-    const rows = listCommitments({ owner: "me", tab: "today" });
+    const rows = await listCommitments({ owner: "me", tab: "today" });
     return {
       intent: "today",
       answer: rows.length
@@ -47,9 +48,9 @@ const HANDLERS: Handler[] = [
   },
 
   // "Which deals are going cold / at risk?"
-  (q) => {
+  async (q) => {
     if (!has(q, "cold", "at risk", "risk", "stall", "quiet", "silent")) return null;
-    const ins = computeInsights();
+    const ins = await computeInsights();
     const rows = [...ins.at_risk, ...ins.going_cold];
     return {
       intent: "risk",
@@ -69,10 +70,10 @@ const HANDLERS: Handler[] = [
   },
 
   // "What did I promise Sarah?" / "What do I owe Acme?"
-  (q) => {
+  async (q) => {
     if (!has(q, "promise", "owe", "commit")) return null;
-    const customer = findCustomer(q);
-    const rows = listCommitments({ owner: "me", customerId: customer?.id, tab: "open" });
+    const customer = await findCustomer(q);
+    const rows = await listCommitments({ owner: "me", customerId: customer?.id, tab: "open" });
     return {
       intent: "commitments",
       answer: rows.length
@@ -83,9 +84,9 @@ const HANDLERS: Handler[] = [
   },
 
   // "Which customers are waiting on me?"
-  (q) => {
+  async (q) => {
     if (!has(q, "waiting", "unanswered", "no reply", "haven't replied")) return null;
-    const ins = computeInsights();
+    const ins = await computeInsights();
     const rows = [...ins.waiting_on_us, ...ins.unanswered_question];
     return {
       intent: "waiting",
@@ -105,7 +106,7 @@ const HANDLERS: Handler[] = [
   },
 
   // "Show me opportunities above $10K with no activity for 7 days"
-  (q) => {
+  async (q) => {
     const valueMatch = q.match(/(?:above|over|more than|>)\s*\$?\s*([\d,.]+)\s*(k|m)?/i);
     const daysMatch = q.match(/(\d+)\s*days?/i);
     if (!valueMatch && !daysMatch) return null;
@@ -119,16 +120,17 @@ const HANDLERS: Handler[] = [
     }
     const days = daysMatch ? parseInt(daysMatch[1], 10) : 0;
 
-    const rows = db
-      .prepare(
-        `SELECT o.id, o.value, o.stage, o.last_interaction_at, c.id AS cid, c.company
-         FROM opportunities o JOIN customers c ON c.id = o.customer_id
-         WHERE o.stage NOT IN ('won','lost') AND o.value >= ?
-           AND (? = 0 OR o.last_interaction_at IS NULL
-                OR julianday('now') - julianday(o.last_interaction_at) >= ?)
-         ORDER BY o.value DESC`,
-      )
-      .all(min, days, days) as Record<string, unknown>[];
+    const rows = await db.all(
+      `SELECT o.id, o.value, o.stage, o.last_interaction_at, c.id AS cid, c.company
+       FROM opportunities o JOIN customers c ON c.id = o.customer_id
+       WHERE o.stage NOT IN ('won','lost') AND o.value >= ?
+         AND (?::int = 0 OR o.last_interaction_at IS NULL
+              OR (CURRENT_DATE - LEFT(o.last_interaction_at, 10)::date) >= ?::int)
+       ORDER BY o.value DESC`,
+      min,
+      days,
+      days,
+    );
 
     return {
       intent: "filter",
@@ -145,14 +147,18 @@ const HANDLERS: Handler[] = [
   },
 
   // "Prepare me for my meeting with Acme tomorrow"
-  (q) => {
+  async (q) => {
     if (!has(q, "prepare", "brief", "prep me", "getting ready")) return null;
-    const customer = findCustomer(q);
+    const customer = await findCustomer(q);
     if (!customer) return null;
-    const signals = listSignals(customer.id).filter((s) => !s.resolved_at);
-    const owed = listCommitments({ owner: "me", customerId: customer.id, tab: "open" });
-    const theirs = listCommitments({ owner: "customer", customerId: customer.id, tab: "open" });
-    const last = listInteractions(customer.id, 1)[0];
+    const [allSignals, owed, theirs, recent] = await Promise.all([
+      listSignals(customer.id),
+      listCommitments({ owner: "me", customerId: customer.id, tab: "open" }),
+      listCommitments({ owner: "customer", customerId: customer.id, tab: "open" }),
+      listInteractions(customer.id, 1),
+    ]);
+    const signals = allSignals.filter((s) => !s.resolved_at);
+    const last = recent[0];
 
     const lines = [
       customer.ai_summary,
@@ -176,10 +182,10 @@ const HANDLERS: Handler[] = [
   },
 
   // "Draft a follow-up for John"
-  (q) => {
+  async (q) => {
     if (!has(q, "draft", "write a", "compose")) return null;
-    const customer = findCustomer(q);
-    const rows = listCommitments({ owner: "me", customerId: customer?.id, tab: "open" });
+    const customer = await findCustomer(q);
+    const rows = await listCommitments({ owner: "me", customerId: customer?.id, tab: "open" });
     return {
       intent: "draft",
       answer: customer
@@ -191,28 +197,24 @@ const HANDLERS: Handler[] = [
 ];
 
 /** Match a customer, contact, or company named anywhere in the question. */
-function findCustomer(q: string) {
-  const rows = db.prepare("SELECT id, name, company FROM customers").all() as {
-    id: number;
-    name: string;
-    company: string;
-  }[];
+async function findCustomer(q: string) {
+  const rows = await db.all<{ id: number; name: string; company: string }>(
+    "SELECT id, name, company FROM customers",
+  );
   const direct = rows.find((r) => q.includes(r.name.toLowerCase()) || q.includes(r.company.toLowerCase()));
   if (direct) return getCustomerByName(direct.name);
 
   // Fall back to a contact's first name ("what did John say about pricing?").
-  const contact = db
-    .prepare("SELECT customer_id, name FROM contacts")
-    .all() as { customer_id: number; name: string }[];
+  const contact = await db.all<{ customer_id: number; name: string }>(
+    "SELECT customer_id, name FROM contacts",
+  );
   const byContact = contact.find((c) => {
     const first = c.name.split(" ")[0].toLowerCase();
     return first.length > 2 && new RegExp(`\\b${first}\\b`).test(q);
   });
   if (!byContact) return null;
-  const row = db.prepare("SELECT * FROM customers WHERE id = ?").get(byContact.customer_id) as
-    | Record<string, unknown>
-    | undefined;
-  return row ? ({ ...row, facts: JSON.parse((row.facts as string) || "{}") } as never as ReturnType<typeof getCustomerByName>) : null;
+  // getCustomer already decodes `facts`, so the hand-rolled parse is gone.
+  return getCustomer(byContact.customer_id);
 }
 
 export async function ask(question: string): Promise<AskResult> {
@@ -220,15 +222,15 @@ export async function ask(question: string): Promise<AskResult> {
   if (!q) return { answer: "Ask me anything about your pipeline.", intent: "none", items: [] };
 
   for (const handler of HANDLERS) {
-    const result = handler(q);
+    const result = await handler(q);
     if (result) return result;
   }
 
   // Freeform fallback: "What did John from Acme say about pricing?"
-  const customer = findCustomer(q);
+  const customer = await findCustomer(q);
   if (customer) {
-    const interactions = listInteractions(customer.id, 8);
-    const signals = listSignals(customer.id);
+    const interactions = await listInteractions(customer.id, 8);
+    const signals = await listSignals(customer.id);
     const context = [
       `Customer: ${customer.company}`,
       `Summary: ${customer.ai_summary ?? "none"}`,
@@ -247,7 +249,7 @@ export async function ask(question: string): Promise<AskResult> {
   }
 
   // No customer identified — answer from the top of the priority feed.
-  const feed = priorityFeed(5).map((f) => f.lead);
+  const feed = (await priorityFeed(5)).map((f) => f.lead);
   return {
     intent: "fallback",
     answer:

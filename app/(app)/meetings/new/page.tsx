@@ -4,8 +4,8 @@ import MeetingForm from "@/components/meetings/MeetingForm";
 
 export const dynamic = "force-dynamic";
 
-export default function NewMeetingPage() {
-  const customers = listCustomers().map((c) => ({ id: c.id, company: c.company }));
+export default async function NewMeetingPage() {
+  const customers = (await listCustomers()).map((c) => ({ id: c.id, company: c.company }));
   return (
     <>
       <PageHeader

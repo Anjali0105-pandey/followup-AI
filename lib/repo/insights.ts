@@ -22,7 +22,7 @@ const BASE_COLS = `
 `;
 
 function rows(sql: string, ...params: unknown[]) {
-  return db.prepare(sql).all(...params) as (Base & Record<string, unknown>)[];
+  return db.all<Base & Record<string, unknown>>(sql, ...params);
 }
 
 function inactiveDays(r: Record<string, unknown>): number | null {
@@ -30,7 +30,21 @@ function inactiveDays(r: Record<string, unknown>): number | null {
   return last ? daysBetween(last.slice(0, 10), today()) : null;
 }
 
-export function computeInsights(): Record<InsightCategory, InsightItem[]> {
+/** jsonb columns arrive decoded; older text rows are still parsed defensively. */
+function strings(value: unknown): string[] {
+  if (Array.isArray(value)) return value as string[];
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? (parsed as string[]) : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+export async function computeInsights(): Promise<Record<InsightCategory, InsightItem[]>> {
   const t = today();
   const out: Record<InsightCategory, InsightItem[]> = {
     hot: [],
@@ -45,13 +59,19 @@ export function computeInsights(): Record<InsightCategory, InsightItem[]> {
 
   const open = `o.stage NOT IN ('won','lost')`;
 
-  // HOT — buying signals plus recent engagement.
-  for (const r of rows(
-    `SELECT ${BASE_COLS},
-            (SELECT COUNT(*) FROM signals s WHERE s.opportunity_id=o.id AND s.kind='buying' AND s.resolved_at IS NULL) AS buying
-     FROM opportunities o JOIN customers c ON c.id=o.customer_id
-     WHERE ${open} AND buying > 0 AND o.probability >= 35
-     ORDER BY o.priority_score DESC`,
+  // HOT — buying signals plus recent engagement. The buying count lives in a
+  // subselect rather than a SELECT alias: Postgres cannot reference an output
+  // alias from WHERE the way SQLite could.
+  for (const r of await rows(
+    `SELECT * FROM (
+       SELECT ${BASE_COLS},
+              (SELECT COUNT(*)::int FROM signals s
+                WHERE s.opportunity_id=o.id AND s.kind='buying' AND s.resolved_at IS NULL) AS buying
+       FROM opportunities o JOIN customers c ON c.id=o.customer_id
+       WHERE ${open} AND o.probability >= 35
+     ) q
+     WHERE q.buying > 0
+     ORDER BY q.priority_score DESC`,
   )) {
     out.hot.push({
       category: "hot",
@@ -68,12 +88,12 @@ export function computeInsights(): Record<InsightCategory, InsightItem[]> {
   }
 
   // AT RISK — two or more risk reasons on the cached score.
-  for (const r of rows(
+  for (const r of await rows(
     `SELECT ${BASE_COLS} FROM opportunities o JOIN customers c ON c.id=o.customer_id
-     WHERE ${open} AND json_array_length(o.risk_reasons) >= 2
+     WHERE ${open} AND jsonb_array_length(o.risk_reasons) >= 2
      ORDER BY o.value DESC`,
   )) {
-    const reasons = JSON.parse((r.risk_reasons as string) || "[]") as string[];
+    const reasons = strings(r.risk_reasons);
     out.at_risk.push({
       category: "at_risk",
       ...pick(r),
@@ -87,10 +107,12 @@ export function computeInsights(): Record<InsightCategory, InsightItem[]> {
   }
 
   // GOING COLD — silence past the stage norm, but not yet flagged at risk.
-  for (const r of rows(
+  // `julianday()` has no Postgres equivalent; subtracting two dates yields the
+  // integer day gap directly.
+  for (const r of await rows(
     `SELECT ${BASE_COLS} FROM opportunities o JOIN customers c ON c.id=o.customer_id
      WHERE ${open} AND o.last_interaction_at IS NOT NULL
-       AND julianday(?) - julianday(o.last_interaction_at) >= 10
+       AND (?::date - LEFT(o.last_interaction_at, 10)::date) >= 10
      ORDER BY o.value DESC`,
     t,
   )) {
@@ -105,17 +127,21 @@ export function computeInsights(): Record<InsightCategory, InsightItem[]> {
     });
   }
 
+  /* created_at is a timestamptz now, so the driver hands back a Date object.
+     Formatting it to a day string in SQL keeps the callers' .slice(0, 10)
+     working and avoids a timezone round-trip in JS. */
+  const SIGNAL_COLS = `s.label, s.detail, to_char(s.created_at, 'YYYY-MM-DD') AS created_at,
+                       c.id AS customer_id, c.name AS customer_name, c.company,
+                       o.id AS opportunity_id, o.value`;
+
   // BUYING SIGNALS — the raw signal rows, most recent first.
-  for (const r of db
-    .prepare(
-      `SELECT s.label, s.detail, s.created_at, c.id AS customer_id, c.name AS customer_name, c.company,
-              o.id AS opportunity_id, o.value
-       FROM signals s JOIN customers c ON c.id=s.customer_id
-       LEFT JOIN opportunities o ON o.id=s.opportunity_id
-       WHERE s.kind='buying' AND s.resolved_at IS NULL
-       ORDER BY s.created_at DESC LIMIT 12`,
-    )
-    .all() as Record<string, unknown>[]) {
+  for (const r of await db.all(
+    `SELECT ${SIGNAL_COLS}
+     FROM signals s JOIN customers c ON c.id=s.customer_id
+     LEFT JOIN opportunities o ON o.id=s.opportunity_id
+     WHERE s.kind='buying' AND s.resolved_at IS NULL
+     ORDER BY s.created_at DESC LIMIT 12`,
+  )) {
     out.buying_signal.push({
       category: "buying_signal",
       customer_id: r.customer_id as number,
@@ -131,16 +157,13 @@ export function computeInsights(): Record<InsightCategory, InsightItem[]> {
   }
 
   // UNANSWERED QUESTIONS.
-  for (const r of db
-    .prepare(
-      `SELECT s.label, s.detail, s.created_at, c.id AS customer_id, c.name AS customer_name, c.company,
-              o.id AS opportunity_id, o.value
-       FROM signals s JOIN customers c ON c.id=s.customer_id
-       LEFT JOIN opportunities o ON o.id=s.opportunity_id
-       WHERE s.kind='question' AND s.resolved_at IS NULL
-       ORDER BY s.created_at ASC`,
-    )
-    .all() as Record<string, unknown>[]) {
+  for (const r of await db.all(
+    `SELECT ${SIGNAL_COLS}
+     FROM signals s JOIN customers c ON c.id=s.customer_id
+     LEFT JOIN opportunities o ON o.id=s.opportunity_id
+     WHERE s.kind='question' AND s.resolved_at IS NULL
+     ORDER BY s.created_at ASC`,
+  )) {
     const age = daysBetween((r.created_at as string).slice(0, 10), t);
     out.unanswered_question.push({
       category: "unanswered_question",
@@ -157,16 +180,15 @@ export function computeInsights(): Record<InsightCategory, InsightItem[]> {
   }
 
   // MISSED FOLLOW-UPS — overdue commitments we owe.
-  for (const r of db
-    .prepare(
-      `SELECT cm.id, cm.title, cm.due_date, c.id AS customer_id, c.name AS customer_name, c.company,
-              o.id AS opportunity_id, o.value
-       FROM commitments cm JOIN customers c ON c.id=cm.customer_id
-       LEFT JOIN opportunities o ON o.id=cm.opportunity_id
-       WHERE cm.owner='me' AND cm.status IN ('open','snoozed') AND cm.due_date < ?
-       ORDER BY cm.due_date ASC`,
-    )
-    .all(t) as Record<string, unknown>[]) {
+  for (const r of await db.all(
+    `SELECT cm.id, cm.title, cm.due_date, c.id AS customer_id, c.name AS customer_name, c.company,
+            o.id AS opportunity_id, o.value
+     FROM commitments cm JOIN customers c ON c.id=cm.customer_id
+     LEFT JOIN opportunities o ON o.id=cm.opportunity_id
+     WHERE cm.owner='me' AND cm.status IN ('open','snoozed') AND cm.due_date < ?
+     ORDER BY cm.due_date ASC`,
+    t,
+  )) {
     const late = daysBetween(r.due_date as string, t);
     out.missed_followup.push({
       category: "missed_followup",
@@ -183,7 +205,7 @@ export function computeInsights(): Record<InsightCategory, InsightItem[]> {
   }
 
   // NO NEXT STEP — open opportunities with nothing on the calendar.
-  for (const r of rows(
+  for (const r of await rows(
     `SELECT ${BASE_COLS} FROM opportunities o JOIN customers c ON c.id=o.customer_id
      WHERE ${open} AND o.next_action_at IS NULL ORDER BY o.value DESC`,
   )) {
@@ -198,19 +220,18 @@ export function computeInsights(): Record<InsightCategory, InsightItem[]> {
   }
 
   // WAITING ON US — the customer's last word, and we haven't replied.
-  for (const r of db
-    .prepare(
-      `SELECT c.id AS customer_id, c.name AS customer_name, c.company,
-              o.id AS opportunity_id, o.value, i.occurred_at, i.subject
-       FROM customers c
-       JOIN interactions i ON i.id = (
-         SELECT id FROM interactions x WHERE x.customer_id=c.id ORDER BY x.occurred_at DESC, x.id DESC LIMIT 1
-       )
-       LEFT JOIN opportunities o ON o.customer_id=c.id AND o.stage NOT IN ('won','lost')
-       WHERE i.direction='inbound' AND julianday(?) - julianday(i.occurred_at) >= 2
-       ORDER BY i.occurred_at ASC`,
-    )
-    .all(t) as Record<string, unknown>[]) {
+  for (const r of await db.all(
+    `SELECT c.id AS customer_id, c.name AS customer_name, c.company,
+            o.id AS opportunity_id, o.value, i.occurred_at, i.subject
+     FROM customers c
+     JOIN interactions i ON i.id = (
+       SELECT id FROM interactions x WHERE x.customer_id=c.id ORDER BY x.occurred_at DESC, x.id DESC LIMIT 1
+     )
+     LEFT JOIN opportunities o ON o.customer_id=c.id AND o.stage NOT IN ('won','lost')
+     WHERE i.direction='inbound' AND (?::date - LEFT(i.occurred_at, 10)::date) >= 2
+     ORDER BY i.occurred_at ASC`,
+    t,
+  )) {
     const waiting = daysBetween((r.occurred_at as string).slice(0, 10), t);
     out.waiting_on_us.push({
       category: "waiting_on_us",

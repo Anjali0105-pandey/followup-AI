@@ -12,10 +12,10 @@ const VIEW_SQL = `
          c.name AS customer_name, c.company, c.ai_summary,
          ct.name AS contact_name, ct.role AS contact_role,
          o.value AS opportunity_value, o.stage AS opportunity_stage,
-         COALESCE(o.priority_band, 'low')  AS priority_band,
-         COALESCE(o.priority_score, 0)     AS priority_score,
-         COALESCE(o.priority_reasons,'[]') AS priority_reasons,
-         COALESCE(o.risk_reasons,'[]')     AS risk_reasons,
+         COALESCE(o.priority_band, 'low')          AS priority_band,
+         COALESCE(o.priority_score, 0)             AS priority_score,
+         COALESCE(o.priority_reasons,'[]'::jsonb)  AS priority_reasons,
+         COALESCE(o.risk_reasons,'[]'::jsonb)      AS risk_reasons,
          o.last_interaction_at,
          (SELECT ai_summary FROM interactions i
            WHERE i.customer_id = cm.customer_id AND i.ai_summary IS NOT NULL
@@ -29,11 +29,25 @@ const VIEW_SQL = `
 const BAND_RANK = `CASE COALESCE(o.priority_band,'low')
   WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END`;
 
+/** jsonb columns arrive decoded; anything else falls back to an empty list. */
+function strings(value: unknown): string[] {
+  if (Array.isArray(value)) return value as string[];
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? (parsed as string[]) : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
 function decorate(r: Record<string, unknown>): CommitmentView {
   return {
     ...(r as unknown as CommitmentView),
-    priority_reasons: JSON.parse((r.priority_reasons as string) || "[]"),
-    risk_reasons: JSON.parse((r.risk_reasons as string) || "[]"),
+    priority_reasons: strings(r.priority_reasons),
+    risk_reasons: strings(r.risk_reasons),
     priority_band: (r.priority_band as PriorityBand) ?? "low",
     ai_recommendation: recommend(r),
   };
@@ -46,7 +60,7 @@ function decorate(r: Record<string, unknown>): CommitmentView {
  */
 function recommend(r: Record<string, unknown>): string {
   const kind = r.kind as CommitmentKind;
-  const risks = JSON.parse((r.risk_reasons as string) || "[]") as string[];
+  const risks = strings(r.risk_reasons);
   const contact = ((r.contact_name as string | null) ?? "them").split(" ")[0];
   const silent = risks.find((x) => x.startsWith("No contact for"));
 
@@ -91,7 +105,7 @@ export interface CommitmentFilter {
   search?: string;
 }
 
-export function listCommitments(f: CommitmentFilter = {}): CommitmentView[] {
+export async function listCommitments(f: CommitmentFilter = {}): Promise<CommitmentView[]> {
   const where: string[] = [];
   const params: unknown[] = [];
   const t = today();
@@ -149,28 +163,29 @@ export function listCommitments(f: CommitmentFilter = {}): CommitmentView[] {
     params.push(f.minValue);
   }
   if (f.search) {
-    where.push("(cm.title LIKE ? OR c.name LIKE ? OR c.company LIKE ?)");
+    // ILIKE, not LIKE: SQLite's LIKE was case-insensitive and Postgres's is not.
+    where.push("(cm.title ILIKE ? OR c.name ILIKE ? OR c.company ILIKE ?)");
     const like = `%${f.search}%`;
     params.push(like, like, like);
   }
 
   const sql = `${VIEW_SQL} ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
-     ORDER BY cm.status = 'done', cm.due_date ASC, ${BAND_RANK}, COALESCE(o.value,0) DESC`;
-  return (db.prepare(sql).all(...params) as Record<string, unknown>[]).map(decorate);
+     ORDER BY (cm.status = 'done'), cm.due_date ASC, ${BAND_RANK}, COALESCE(o.value,0) DESC`;
+  const rows = await db.all(sql, ...params);
+  return rows.map(decorate);
 }
 
-export function getCommitment(id: number): CommitmentView | null {
-  const row = db.prepare(`${VIEW_SQL} WHERE cm.id = ?`).get(id) as Record<string, unknown> | undefined;
+export async function getCommitment(id: number): Promise<CommitmentView | null> {
+  const row = await db.get(`${VIEW_SQL} WHERE cm.id = ?`, id);
   return row ? decorate(row) : null;
 }
 
-export function listCommitmentsForCustomer(customerId: number): CommitmentView[] {
-  return (
-    db.prepare(`${VIEW_SQL} WHERE cm.customer_id = ? ORDER BY cm.status = 'done', cm.due_date`).all(customerId) as Record<
-      string,
-      unknown
-    >[]
-  ).map(decorate);
+export async function listCommitmentsForCustomer(customerId: number): Promise<CommitmentView[]> {
+  const rows = await db.all(
+    `${VIEW_SQL} WHERE cm.customer_id = ? ORDER BY (cm.status = 'done'), cm.due_date`,
+    customerId,
+  );
+  return rows.map(decorate);
 }
 
 /**
@@ -184,16 +199,16 @@ export interface FeedItem {
   also: CommitmentView[];
 }
 
-export function priorityFeed(limit = 8): FeedItem[] {
+export async function priorityFeed(limit = 8): Promise<FeedItem[]> {
   const t = today();
-  const rows = db
-    .prepare(
-      `${VIEW_SQL}
+  const rows = await db.all(
+    `${VIEW_SQL}
        WHERE cm.owner = 'me' AND cm.status = 'open'
          AND (cm.snoozed_until IS NULL OR cm.snoozed_until <= ?)
        ORDER BY (cm.due_date <= ?) DESC, COALESCE(o.priority_score,0) DESC, cm.due_date ASC`,
-    )
-    .all(t, t) as Record<string, unknown>[];
+    t,
+    t,
+  );
 
   const byCustomer = new Map<number, CommitmentView[]>();
   for (const row of rows) {
@@ -214,28 +229,26 @@ export interface Counts {
   waitingOnYou: number;
 }
 
-export function headlineCounts(): Counts {
+export async function headlineCounts(): Promise<Counts> {
   const t = today();
-  const n = (sql: string, ...p: unknown[]) => (db.prepare(sql).get(...p) as { n: number }).n;
-  return {
-    todayActions: n(
-      "SELECT COUNT(*) n FROM commitments WHERE owner='me' AND status='open' AND due_date <= ?",
-      t,
-    ),
-    overdue: n("SELECT COUNT(*) n FROM commitments WHERE owner='me' AND status='open' AND due_date < ?", t),
-    atRisk: n("SELECT COUNT(*) n FROM opportunities WHERE stage NOT IN ('won','lost') AND json_array_length(risk_reasons) >= 2"),
-    hot: n(
-      `SELECT COUNT(DISTINCT o.id) n FROM opportunities o
+  const n = async (sql: string, ...p: unknown[]) => (await db.get<{ n: number }>(sql, ...p))?.n ?? 0;
+
+  const [todayActions, overdue, atRisk, hot, waitingOnYou] = await Promise.all([
+    n("SELECT COUNT(*)::int n FROM commitments WHERE owner='me' AND status='open' AND due_date <= ?", t),
+    n("SELECT COUNT(*)::int n FROM commitments WHERE owner='me' AND status='open' AND due_date < ?", t),
+    n("SELECT COUNT(*)::int n FROM opportunities WHERE stage NOT IN ('won','lost') AND jsonb_array_length(risk_reasons) >= 2"),
+    n(
+      `SELECT COUNT(DISTINCT o.id)::int n FROM opportunities o
        JOIN signals s ON s.opportunity_id = o.id AND s.kind='buying' AND s.resolved_at IS NULL
        WHERE o.stage NOT IN ('won','lost')`,
     ),
-    waitingOnYou: n(
-      `SELECT COUNT(DISTINCT customer_id) n FROM signals WHERE kind='question' AND resolved_at IS NULL`,
-    ),
-  };
+    n(`SELECT COUNT(DISTINCT customer_id)::int n FROM signals WHERE kind='question' AND resolved_at IS NULL`),
+  ]);
+
+  return { todayActions, overdue, atRisk, hot, waitingOnYou };
 }
 
-export function createCommitment(input: {
+export async function createCommitment(input: {
   customerId: number;
   opportunityId?: number | null;
   contactId?: number | null;
@@ -246,63 +259,65 @@ export function createCommitment(input: {
   detail?: string | null;
   dueDate: string;
   source?: "ai_extracted" | "manual";
-}): number {
-  const info = db
-    .prepare(
-      `INSERT INTO commitments
-         (customer_id, opportunity_id, contact_id, interaction_id, owner, kind, title, detail, due_date, source)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
-      input.customerId,
-      input.opportunityId ?? null,
-      input.contactId ?? null,
-      input.interactionId ?? null,
-      input.owner,
-      input.kind,
-      input.title,
-      input.detail ?? null,
-      input.dueDate,
-      input.source ?? "manual",
-    );
-  if (input.opportunityId) rescoreOpportunity(input.opportunityId);
-  return Number(info.lastInsertRowid);
+}): Promise<number> {
+  const id = await db.insert(
+    `INSERT INTO commitments
+       (customer_id, opportunity_id, contact_id, interaction_id, owner, kind, title, detail, due_date, source)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     RETURNING id`,
+    input.customerId,
+    input.opportunityId ?? null,
+    input.contactId ?? null,
+    input.interactionId ?? null,
+    input.owner,
+    input.kind,
+    input.title,
+    input.detail ?? null,
+    input.dueDate,
+    input.source ?? "manual",
+  );
+  if (input.opportunityId) await rescoreOpportunity(input.opportunityId);
+  return id;
 }
 
-function opportunityOf(id: number): number | null {
-  const row = db.prepare("SELECT opportunity_id FROM commitments WHERE id = ?").get(id) as
-    | { opportunity_id: number | null }
-    | undefined;
+async function opportunityOf(id: number): Promise<number | null> {
+  const row = await db.get<{ opportunity_id: number | null }>(
+    "SELECT opportunity_id FROM commitments WHERE id = ?",
+    id,
+  );
   return row?.opportunity_id ?? null;
 }
 
-export function completeCommitment(id: number) {
-  db.prepare("UPDATE commitments SET status='done', completed_at=datetime('now') WHERE id = ?").run(id);
-  const opp = opportunityOf(id);
-  if (opp) rescoreOpportunity(opp);
+/** Matches the timestamp shape the SQLite build wrote, so stored values stay comparable. */
+const NOW_TEXT = `to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD HH24:MI:SS')`;
+
+export async function completeCommitment(id: number) {
+  await db.run(`UPDATE commitments SET status='done', completed_at=${NOW_TEXT} WHERE id = ?`, id);
+  const opp = await opportunityOf(id);
+  if (opp) await rescoreOpportunity(opp);
 }
 
-export function reopenCommitment(id: number) {
-  db.prepare("UPDATE commitments SET status='open', completed_at=NULL WHERE id = ?").run(id);
-  const opp = opportunityOf(id);
-  if (opp) rescoreOpportunity(opp);
+export async function reopenCommitment(id: number) {
+  await db.run("UPDATE commitments SET status='open', completed_at=NULL WHERE id = ?", id);
+  const opp = await opportunityOf(id);
+  if (opp) await rescoreOpportunity(opp);
 }
 
-export function snoozeCommitment(id: number, days: number) {
+export async function snoozeCommitment(id: number, days: number) {
   const next = addDays(today(), days);
-  db.prepare("UPDATE commitments SET due_date=?, snoozed_until=?, status='open' WHERE id = ?").run(next, next, id);
-  const opp = opportunityOf(id);
-  if (opp) rescoreOpportunity(opp);
+  await db.run("UPDATE commitments SET due_date=?, snoozed_until=?, status='open' WHERE id = ?", next, next, id);
+  const opp = await opportunityOf(id);
+  if (opp) await rescoreOpportunity(opp);
 }
 
-export function rescheduleCommitment(id: number, date: string) {
-  db.prepare("UPDATE commitments SET due_date=?, snoozed_until=NULL WHERE id = ?").run(date, id);
-  const opp = opportunityOf(id);
-  if (opp) rescoreOpportunity(opp);
+export async function rescheduleCommitment(id: number, date: string) {
+  await db.run("UPDATE commitments SET due_date=?, snoozed_until=NULL WHERE id = ?", date, id);
+  const opp = await opportunityOf(id);
+  if (opp) await rescoreOpportunity(opp);
 }
 
-export function deleteCommitment(id: number) {
-  const opp = opportunityOf(id);
-  db.prepare("DELETE FROM commitments WHERE id = ?").run(id);
-  if (opp) rescoreOpportunity(opp);
+export async function deleteCommitment(id: number) {
+  const opp = await opportunityOf(id);
+  await db.run("DELETE FROM commitments WHERE id = ?", id);
+  if (opp) await rescoreOpportunity(opp);
 }

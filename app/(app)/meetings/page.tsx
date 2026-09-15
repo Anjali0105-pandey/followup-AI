@@ -5,8 +5,8 @@ import { formatDay, relativePast } from "@/lib/dates";
 
 export const dynamic = "force-dynamic";
 
-export default function MeetingsPage() {
-  const meetings = listMeetings();
+export default async function MeetingsPage() {
+  const meetings = await listMeetings();
   const totalActions = meetings.reduce((s, m) => s + m.actions_created, 0);
 
   return (

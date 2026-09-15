@@ -30,14 +30,17 @@ const SIGNAL_SECTIONS: { kind: SignalKind; title: string; tone: "positive" | "ri
 export default async function Customer360(props: PageProps<"/customers/[id]">) {
   const { id } = await props.params;
   const customerId = Number(id);
-  const customer = getCustomer(customerId);
+  const customer = await getCustomer(customerId);
   if (!customer) notFound();
 
-  const contacts = listContacts(customerId);
-  const opportunities = listOpportunitiesFor(customerId);
-  const interactions = listInteractions(customerId);
-  const signals = listSignals(customerId).filter((s) => !s.resolved_at);
-  const commitments = listCommitmentsForCustomer(customerId);
+  const [contacts, opportunities, interactions, allSignals, commitments] = await Promise.all([
+    listContacts(customerId),
+    listOpportunitiesFor(customerId),
+    listInteractions(customerId),
+    listSignals(customerId),
+    listCommitmentsForCustomer(customerId),
+  ]);
+  const signals = allSignals.filter((s) => !s.resolved_at);
 
   const primary = contacts.find((c) => c.is_decision_maker) ?? contacts[0];
   const openOpp = opportunities.find((o) => o.stage !== "won" && o.stage !== "lost") ?? opportunities[0];

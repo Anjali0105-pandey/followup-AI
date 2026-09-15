@@ -6,9 +6,8 @@ import { GeneratorProvider } from "@/components/generator/GeneratorProvider";
 import { currentUser, navCounts } from "@/lib/repo/workspace";
 import { AI_MODE } from "@/lib/ai";
 
-export default function AppLayout({ children }: LayoutProps<"/">) {
-  const user = currentUser();
-  const counts = navCounts();
+export default async function AppLayout({ children }: LayoutProps<"/">) {
+  const [user, counts] = await Promise.all([currentUser(), navCounts()]);
 
   return (
     <ToastProvider>

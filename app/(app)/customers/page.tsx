@@ -12,7 +12,7 @@ export default async function CustomersPage(props: PageProps<"/customers">) {
   const sp = await props.searchParams;
   const q = ((Array.isArray(sp.q) ? sp.q[0] : sp.q) as string | undefined)?.toLowerCase() ?? "";
 
-  const all = listCustomers();
+  const all = await listCustomers();
   const customers = q
     ? all.filter((c) => `${c.company} ${c.name} ${c.industry ?? ""}`.toLowerCase().includes(q))
     : all;

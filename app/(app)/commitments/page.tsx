@@ -15,9 +15,11 @@ export default async function CommitmentsPage(props: PageProps<"/commitments">) 
   const sp = await props.searchParams;
   const tab = ((Array.isArray(sp.tab) ? sp.tab[0] : sp.tab) as string) ?? "owed";
 
-  const mine = listCommitments({ owner: "me", tab: "open" });
-  const theirs = listCommitments({ owner: "customer", tab: "open" });
-  const done = listCommitments({ tab: "completed" });
+  const [mine, theirs, done] = await Promise.all([
+    listCommitments({ owner: "me", tab: "open" }),
+    listCommitments({ owner: "customer", tab: "open" }),
+    listCommitments({ tab: "completed" }),
+  ]);
 
   const active = tab === "theirs" ? theirs : tab === "done" ? done : mine;
 

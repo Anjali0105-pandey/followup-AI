@@ -41,15 +41,13 @@ function decorate(r: Record<string, unknown>): OpportunityView {
   };
 }
 
-export function listOpportunities(): OpportunityView[] {
-  const rows = db
-    .prepare(`${VIEW_SQL} ORDER BY o.priority_score DESC, o.value DESC`)
-    .all() as Record<string, unknown>[];
+export async function listOpportunities(): Promise<OpportunityView[]> {
+  const rows = await db.all(`${VIEW_SQL} ORDER BY o.priority_score DESC, o.value DESC`);
   return rows.map(decorate);
 }
 
-export function getOpportunity(id: number): OpportunityView | null {
-  const row = db.prepare(`${VIEW_SQL} WHERE o.id = ?`).get(id) as Record<string, unknown> | undefined;
+export async function getOpportunity(id: number): Promise<OpportunityView | null> {
+  const row = await db.get(`${VIEW_SQL} WHERE o.id = ?`, id);
   return row ? decorate(row) : null;
 }
 
@@ -64,22 +62,23 @@ const STAGE_PROBABILITY: Record<Stage, number> = {
   lost: 0,
 };
 
-export function moveStage(id: number, stage: Stage) {
-  db.prepare(
-    `UPDATE opportunities SET stage = ?, probability = ?, updated_at = datetime('now') WHERE id = ?`,
-  ).run(stage, STAGE_PROBABILITY[stage], id);
-  rescoreOpportunity(id);
+export async function moveStage(id: number, stage: Stage) {
+  await db.run(
+    `UPDATE opportunities SET stage = ?, probability = ?, updated_at = now() WHERE id = ?`,
+    stage,
+    STAGE_PROBABILITY[stage],
+    id,
+  );
+  await rescoreOpportunity(id);
 }
 
 /** Median open-deal value, the normaliser for the deal-size component. */
-function pipelineMedian(): number {
-  const values = (
-    db
-      .prepare("SELECT value FROM opportunities WHERE stage NOT IN ('won','lost') ORDER BY value")
-      .all() as { value: number }[]
-  ).map((r) => r.value);
-  if (values.length === 0) return 10_000;
-  return values[Math.floor(values.length / 2)];
+async function pipelineMedian(): Promise<number> {
+  const rows = await db.all<{ value: number }>(
+    "SELECT value FROM opportunities WHERE stage NOT IN ('won','lost') ORDER BY value",
+  );
+  if (rows.length === 0) return 10_000;
+  return rows[Math.floor(rows.length / 2)].value;
 }
 
 /**
@@ -87,46 +86,44 @@ function pipelineMedian(): number {
  * interaction, commitment change, stage move) — never on page load, so list
  * screens stay a pure read of cached columns.
  */
-export function rescoreOpportunity(id: number, median?: number) {
-  const opp = db.prepare("SELECT * FROM opportunities WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+export async function rescoreOpportunity(id: number, median?: number) {
+  const opp = await db.get("SELECT * FROM opportunities WHERE id = ?", id);
   if (!opp) return;
   const stage = opp.stage as Stage;
 
   const t = today();
-  const openMine = db
-    .prepare(
-      `SELECT due_date FROM commitments
-       WHERE opportunity_id = ? AND owner = 'me' AND status IN ('open','snoozed')`,
-    )
-    .all(id) as { due_date: string }[];
+  const openMine = await db.all<{ due_date: string }>(
+    `SELECT due_date FROM commitments
+     WHERE opportunity_id = ? AND owner = 'me' AND status IN ('open','snoozed')`,
+    id,
+  );
 
-  const counts = db
-    .prepare(
-      `SELECT kind, COUNT(*) AS n, SUM(strength) AS strength FROM signals
-       WHERE opportunity_id = ? AND resolved_at IS NULL GROUP BY kind`,
-    )
-    .all(id) as { kind: string; n: number; strength: number }[];
+  // COUNT and SUM come back as bigint, which the driver stringifies — cast so
+  // the scoring maths gets numbers rather than "3".
+  const counts = await db.all<{ kind: string; n: number; strength: number }>(
+    `SELECT kind, COUNT(*)::int AS n, COALESCE(SUM(strength),0)::int AS strength FROM signals
+     WHERE opportunity_id = ? AND resolved_at IS NULL GROUP BY kind`,
+    id,
+  );
   const byKind = Object.fromEntries(counts.map((c) => [c.kind, c.n])) as Record<string, number>;
   const strengthOf = Object.fromEntries(counts.map((c) => [c.kind, c.strength])) as Record<string, number>;
 
-  const lastInteraction = (
-    db
-      .prepare("SELECT MAX(occurred_at) AS m FROM interactions WHERE opportunity_id = ?")
-      .get(id) as { m: string | null }
-  ).m;
+  const lastInteraction =
+    (await db.get<{ m: string | null }>("SELECT MAX(occurred_at) AS m FROM interactions WHERE opportunity_id = ?", id))
+      ?.m ?? null;
 
-  const nextAction = (
-    db
-      .prepare(
+  const nextAction =
+    (
+      await db.get<{ d: string | null }>(
         `SELECT MIN(due_date) AS d FROM commitments
          WHERE opportunity_id = ? AND owner = 'me' AND status IN ('open','snoozed')`,
+        id,
       )
-      .get(id) as { d: string | null }
-  ).d;
+    )?.d ?? null;
 
   const result = scoreOpportunity({
     value: opp.value as number,
-    pipelineMedian: median ?? pipelineMedian(),
+    pipelineMedian: median ?? (await pipelineMedian()),
     stage,
     probability: opp.probability as number,
     daysOverdue: maxDaysOverdue(openMine.map((c) => c.due_date)),
@@ -140,12 +137,13 @@ export function rescoreOpportunity(id: number, median?: number) {
     hasNextStep: openMine.length > 0,
   });
 
-  db.prepare(
+  // The ::jsonb casts matter: passing a JS array as a parameter would be
+  // encoded as a Postgres array literal, not as JSON.
+  await db.run(
     `UPDATE opportunities
-     SET priority_score = ?, priority_band = ?, priority_reasons = ?, risk_reasons = ?,
-         last_interaction_at = ?, next_action_at = ?, updated_at = datetime('now')
+     SET priority_score = ?, priority_band = ?, priority_reasons = ?::jsonb, risk_reasons = ?::jsonb,
+         last_interaction_at = ?, next_action_at = ?, updated_at = now()
      WHERE id = ?`,
-  ).run(
     result.score,
     result.band,
     JSON.stringify(result.reasons),
@@ -158,22 +156,21 @@ export function rescoreOpportunity(id: number, median?: number) {
   // Health is a projection of the score's risk half, so the two can never
   // disagree on screen.
   const health = result.riskReasons.length >= 2 ? "at_risk" : result.riskReasons.length === 1 ? "watch" : "healthy";
-  db.prepare("UPDATE customers SET health = ? WHERE id = ?").run(health, opp.customer_id as number);
+  await db.run("UPDATE customers SET health = ? WHERE id = ?", health, opp.customer_id as number);
 }
 
-export function rescoreAll() {
-  const median = pipelineMedian();
-  const ids = db.prepare("SELECT id FROM opportunities").all() as { id: number }[];
-  for (const { id } of ids) rescoreOpportunity(id, median);
+export async function rescoreAll() {
+  const median = await pipelineMedian();
+  const ids = await db.all<{ id: number }>("SELECT id FROM opportunities");
+  for (const { id } of ids) await rescoreOpportunity(id, median);
 }
 
 /** The opportunity a commitment or interaction should attach to by default. */
-export function primaryOpportunityFor(customerId: number): number | null {
-  const row = db
-    .prepare(
-      `SELECT id FROM opportunities WHERE customer_id = ? AND stage NOT IN ('won','lost')
-       ORDER BY value DESC LIMIT 1`,
-    )
-    .get(customerId) as { id: number } | undefined;
+export async function primaryOpportunityFor(customerId: number): Promise<number | null> {
+  const row = await db.get<{ id: number }>(
+    `SELECT id FROM opportunities WHERE customer_id = ? AND stage NOT IN ('won','lost')
+     ORDER BY value DESC LIMIT 1`,
+    customerId,
+  );
   return row?.id ?? null;
 }

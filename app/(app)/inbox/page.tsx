@@ -11,16 +11,15 @@ export const dynamic = "force-dynamic";
  * inbound messages we genuinely have (logged interactions) and is honest that
  * live channels are not connected yet.
  */
-export default function InboxPage() {
-  const inbound = db
-    .prepare(
-      `SELECT i.*, c.company, c.id AS cid,
-              (SELECT group_concat(s.kind || '|' || s.label, '§') FROM signals s WHERE s.interaction_id = i.id) AS sig
-       FROM interactions i JOIN customers c ON c.id = i.customer_id
-       WHERE i.direction = 'inbound'
-       ORDER BY i.occurred_at DESC`,
-    )
-    .all() as Record<string, unknown>[];
+export default async function InboxPage() {
+  // SQLite's group_concat(x, sep) is string_agg(x, sep) in Postgres.
+  const inbound = await db.all<Record<string, unknown>>(
+    `SELECT i.*, c.company, c.id AS cid,
+            (SELECT string_agg(s.kind || '|' || s.label, '§') FROM signals s WHERE s.interaction_id = i.id) AS sig
+     FROM interactions i JOIN customers c ON c.id = i.customer_id
+     WHERE i.direction = 'inbound'
+     ORDER BY i.occurred_at DESC`,
+  );
 
   return (
     <>

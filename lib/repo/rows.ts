@@ -7,13 +7,17 @@ import type {
   Signal,
 } from "@/lib/types";
 
-// Row -> entity mappers. SQLite has no JSON or boolean type, so JSON columns
-// arrive as strings and booleans as 0/1; every read goes through here so that
-// parsing lives in exactly one place.
+// Row -> entity mappers. Booleans are stored as 0/1 smallints, and JSON
+// columns are a mix: jsonb columns arrive already parsed from the driver,
+// while `facts` is still TEXT and arrives as a string. Every read goes through
+// here so that decoding lives in exactly one place.
 
 type Row = Record<string, unknown>;
 
 function json<T>(value: unknown, fallback: T): T {
+  if (value == null) return fallback;
+  // jsonb columns are decoded by the driver before they reach us.
+  if (typeof value === "object") return value as T;
   if (typeof value !== "string") return fallback;
   try {
     return JSON.parse(value) as T;
