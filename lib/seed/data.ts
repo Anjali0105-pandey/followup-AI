@@ -62,10 +62,10 @@ export interface SeedCustomer {
 
 export const WORKSPACE = { name: "Northwind Sales", plan: "pro" };
 export const USER = {
-  name: "Rahul Sharma",
-  email: "rahul@northwind.io",
+  name: "Anjali Pandey",
+  email: "anjali@northwind.io",
   role: "Senior Account Executive",
-  initials: "RS",
+  initials: "AP",
 };
 
 export const CUSTOMERS: SeedCustomer[] = [
@@ -99,7 +99,7 @@ export const CUSTOMERS: SeedCustomer[] = [
         aiSummary:
           "John was genuinely enthusiastic about the product but returned twice to implementation effort. He asked for a concrete week-by-week rollout plan before taking it to the CFO.",
         transcript:
-          "John: The product itself looks great — the team liked the audit trail.\nRahul: Glad to hear it.\nJohn: My worry is time. Last tool we bought took four months to roll out and it burned goodwill internally.\nRahul: Understood. Our median for a 140-seat org is two weeks.\nJohn: If you can put that in writing week by week, I can take it to our CFO.\nPriya: Also — does SSO come in the base tier or is it an add-on?\nRahul: I'll confirm the exact packaging.\nJohn: Send both and let's talk Thursday.",
+          "John: The product itself looks great — the team liked the audit trail.\nAnjali: Glad to hear it.\nJohn: My worry is time. Last tool we bought took four months to roll out and it burned goodwill internally.\nAnjali: Understood. Our median for a 140-seat org is two weeks.\nJohn: If you can put that in writing week by week, I can take it to our CFO.\nPriya: Also — does SSO come in the base tier or is it an add-on?\nAnjali: I'll confirm the exact packaging.\nJohn: Send both and let's talk Thursday.",
         signals: [
           { kind: "buying", label: "Asked for a rollout plan to take to the CFO", detail: "Explicitly framed as the last step before internal approval.", strength: 3 },
           { kind: "objection", label: "Implementation time", detail: "Previous tool took four months to roll out.", strength: 3 },

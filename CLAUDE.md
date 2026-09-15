@@ -1,5 +1,14 @@
 @AGENTS.md
 
+## Git commits — never commit automatically
+
+NEVER run `git commit`, `git push`, or any command that creates or publishes a commit.
+This applies without exception, including when the work is finished, when a plan step
+says "commit", or when a commit seems obviously wanted.
+
+Instead: write out the suggested commit message and stop. The user reviews the changes
+and runs the commit themselves, every time. Always prompt — never assume approval.
+
 ## Resume / PDF generation
 
 Whenever generating a PDF for the user (e.g. a resume), always:

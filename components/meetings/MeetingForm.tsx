@@ -11,13 +11,13 @@ import { useToast } from "@/components/shell/Toast";
 import { Badge } from "@/components/ui";
 
 const SAMPLE = `John: The product itself looks great — the team liked the audit trail.
-Rahul: Glad to hear it.
+Anjali: Glad to hear it.
 John: My worry is implementation time. The last tool we bought took four months and it burned goodwill internally.
-Rahul: Understood. Our median for a 140-seat org is two weeks. I'll send you a week-by-week plan.
+Anjali: Understood. Our median for a 140-seat org is two weeks. I'll send you a week-by-week plan.
 Priya: Does SSO come in the base tier or is it an add-on?
-Rahul: I'll confirm the exact packaging and send it across.
+Anjali: I'll confirm the exact packaging and send it across.
 John: If the plan holds up I'll bring our CFO to the next call. Budget is approved at $18,000.
-Rahul: Perfect — let's schedule that for Thursday.`;
+Anjali: Perfect — let's schedule that for Thursday.`;
 
 type Step = "form" | "extracting" | "review";
 
