@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { generateDraftAction, markSentAction, refineDraftAction } from "@/app/actions";
 import type { DraftContext } from "@/app/actions";
 import type { GeneratorTarget } from "@/components/generator/GeneratorProvider";
 import { useToast } from "@/components/shell/Toast";
+import { useOverlayLock } from "@/components/shell/useOverlay";
 
 type Channel = "email" | "whatsapp" | "linkedin" | "call_script";
 
@@ -28,13 +29,26 @@ export default function GeneratorDrawer({ target, onClose }: { target: Generator
   const [context, setContext] = useState<DraftContext | null>(null);
   const [showContext, setShowContext] = useState(true);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
   const { toast } = useToast();
+
+  // Marks an overlay open so the priority feed's D/S/C shortcuts don't act on
+  // the card behind this drawer.
+  useOverlayLock();
 
   // The drawer may be opened knowing only a commitment; the server resolves
   // the account and hands it back on the context.
   const [customerId, setCustomerId] = useState<number | null>(target.customerId ?? null);
   const commitmentId = target.commitmentId ?? null;
+
+  /* Drafts already generated in this drawer, keyed by channel. Switching
+     channel tabs used to re-run the whole pipeline every time — rebuild the
+     account context (four database round-trips) and make a fresh model call —
+     so comparing an email against a WhatsApp and going back cost three full
+     generations. Regenerate is still one click away when the rep wants a new
+     take. */
+  const cache = useRef(new Map<Channel, string>());
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -44,15 +58,34 @@ export default function GeneratorDrawer({ target, onClose }: { target: Generator
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  /* A model call can fail (bad key, quota, network). Without a catch the
+     rejection was swallowed and `loading` stayed true, leaving the drawer stuck
+     on "Drafting…" with no way forward but closing it. */
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const result = await generateDraftAction(target.customerId ?? null, commitmentId, channel);
-      if (cancelled) return;
-      setBody(result.body);
-      setContext(result.context);
-      setCustomerId(result.context.customerId);
-      setLoading(false);
+      setError(null);
+
+      const cached = cache.current.get(channel);
+      if (cached !== undefined) {
+        setBody(cached);
+        setLoading(false);
+        return;
+      }
+
+      try {
+        const result = await generateDraftAction(target.customerId ?? null, commitmentId, channel);
+        if (cancelled) return;
+        cache.current.set(channel, result.body);
+        setBody(result.body);
+        setContext(result.context);
+        setCustomerId(result.context.customerId);
+      } catch (e) {
+        if (cancelled) return;
+        setError(e instanceof Error ? e.message : "Could not generate a draft.");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
     })();
     return () => {
       cancelled = true;
@@ -61,19 +94,34 @@ export default function GeneratorDrawer({ target, onClose }: { target: Generator
 
   function regenerate() {
     setLoading(true);
+    setError(null);
     startTransition(async () => {
-      const result = await generateDraftAction(customerId, commitmentId, channel);
-      setBody(result.body);
-      setContext(result.context);
-      setLoading(false);
+      try {
+        const result = await generateDraftAction(customerId, commitmentId, channel);
+        cache.current.set(channel, result.body);
+        setBody(result.body);
+        setContext(result.context);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Could not regenerate the draft.");
+      } finally {
+        setLoading(false);
+      }
     });
   }
 
   function refine(key: string) {
     setLoading(true);
+    setError(null);
     startTransition(async () => {
-      setBody(await refineDraftAction(body, key));
-      setLoading(false);
+      try {
+        const revised = await refineDraftAction(body, key);
+        cache.current.set(channel, revised);
+        setBody(revised);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Could not revise the draft.");
+      } finally {
+        setLoading(false);
+      }
     });
   }
 
@@ -129,6 +177,7 @@ export default function GeneratorDrawer({ target, onClose }: { target: Generator
               onClick={() => {
                 if (c.key === channel) return;
                 setLoading(true);
+                setError(null);
                 setChannel(c.key);
               }}
               className={`focus-ring rounded-[7px] px-2.5 py-1.5 text-[13px] transition-colors ${
@@ -150,10 +199,24 @@ export default function GeneratorDrawer({ target, onClose }: { target: Generator
                 <div key={i} className="h-3.5 rounded bg-sunken" style={{ width: `${95 - i * 9}%` }} />
               ))}
             </div>
+          ) : error ? (
+            <div className="card border-risk-line bg-risk-tint p-4">
+              <p className="text-[13px] font-medium text-risk">Drafting failed</p>
+              <p className="t-meta mt-1 text-[12.5px]">{error}</p>
+              <button
+                onClick={regenerate}
+                className="focus-ring mt-3 rounded-[7px] border border-line bg-card px-3 py-1.5 text-[13px] hover:bg-sunken"
+              >
+                Try again
+              </button>
+            </div>
           ) : (
             <textarea
               value={body}
-              onChange={(e) => setBody(e.target.value)}
+              onChange={(e) => {
+                setBody(e.target.value);
+                cache.current.set(channel, e.target.value);
+              }}
               spellCheck={false}
               className="focus-ring h-full min-h-[280px] w-full resize-none rounded-[7px] border border-line bg-card p-3 font-sans text-[13px] leading-6 outline-none"
             />
@@ -165,7 +228,7 @@ export default function GeneratorDrawer({ target, onClose }: { target: Generator
             {REFINEMENTS.map((r) => (
               <button
                 key={r.key}
-                disabled={loading}
+                disabled={loading || !!error}
                 onClick={() => refine(r.key)}
                 className="focus-ring rounded-full border border-line px-2.5 py-1 text-[12px] text-ink-2 transition-colors hover:bg-sunken disabled:opacity-40"
               >
@@ -182,19 +245,29 @@ export default function GeneratorDrawer({ target, onClose }: { target: Generator
           </div>
           <div className="flex items-center gap-2">
             <button
-              onClick={() => {
-                navigator.clipboard?.writeText(body);
-                toast("Draft copied to clipboard", { tone: "positive" });
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(body);
+                  toast("Draft copied to clipboard", { tone: "positive" });
+                } catch {
+                  // Clipboard access needs a secure context and can be denied.
+                  toast("Couldn't copy — select the text and copy manually.", { tone: "risk" });
+                }
               }}
               className="focus-ring rounded-[7px] border border-line px-3 py-2 text-[13px] hover:bg-sunken"
             >
               Copy
             </button>
             <button
-              disabled={pending || loading || !customerId}
+              disabled={pending || loading || !!error || !customerId || !body.trim()}
               onClick={() =>
                 startTransition(async () => {
-                  await markSentAction({ customerId: customerId!, commitmentId, channel, body });
+                  try {
+                    await markSentAction({ customerId: customerId!, commitmentId, channel, body });
+                  } catch (e) {
+                    toast(e instanceof Error ? e.message : "Could not log that as sent.", { tone: "risk" });
+                    return;
+                  }
                   toast("Sent, logged, and follow-up closed", { tone: "positive" });
                   onClose();
                 })

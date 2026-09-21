@@ -8,9 +8,15 @@ import type { FeedItem } from "@/lib/repo/commitments";
 import { BAND_BAR, PriorityChip, Avatar } from "@/components/ui";
 import { money } from "@/lib/format";
 import { relativeDue, relativePast, today } from "@/lib/dates";
-import { completeCommitmentAction, reopenCommitmentAction, snoozeCommitmentAction } from "@/app/actions";
+import {
+  completeCommitmentAction,
+  reopenCommitmentAction,
+  rescheduleCommitmentAction,
+  snoozeCommitmentAction,
+} from "@/app/actions";
 import { useToast } from "@/components/shell/Toast";
 import { useGenerator } from "@/components/generator/GeneratorProvider";
+import { shouldIgnoreShortcut } from "@/components/shell/useOverlay";
 
 /**
  * The Command Center feed. Every card answers the same five questions in the
@@ -41,10 +47,18 @@ export default function PriorityFeed({ items: feed }: { items: FeedItem[] }) {
     });
   }
 
+  /* The card is hidden optimistically, but a failed write has to put it back —
+     otherwise the rep sees a completed action that is still open on reload. */
   function complete(item: CommitmentView) {
     dismiss(item.id);
     startTransition(async () => {
-      await completeCommitmentAction(item.id);
+      try {
+        await completeCommitmentAction(item.id);
+      } catch {
+        restore(item.id);
+        toast("Could not mark that done. Try again.", { tone: "risk" });
+        return;
+      }
       toast(`Done — ${item.title}`, {
         tone: "positive",
         undo: () => {
@@ -58,15 +72,33 @@ export default function PriorityFeed({ items: feed }: { items: FeedItem[] }) {
   function snooze(item: CommitmentView, days: number) {
     dismiss(item.id);
     startTransition(async () => {
-      await snoozeCommitmentAction(item.id, days);
-      toast(`Snoozed ${days === 1 ? "1 day" : `${days} days`}`, { undo: () => restore(item.id) });
+      let previousDueDate: string | null = null;
+      try {
+        ({ previousDueDate } = await snoozeCommitmentAction(item.id, days));
+      } catch {
+        restore(item.id);
+        toast("Could not snooze that. Try again.", { tone: "risk" });
+        return;
+      }
+      /* Undo restores the original due date on the server. It used to only
+         un-hide the card, leaving the row snoozed — an undo that undid
+         nothing, and the card came back showing a date it no longer had. */
+      toast(`Snoozed ${days === 1 ? "1 day" : `${days} days`}`, {
+        undo: () => {
+          restore(item.id);
+          if (previousDueDate) {
+            startTransition(() => void rescheduleCommitmentAction(item.id, previousDueDate!));
+          }
+        },
+      });
     });
   }
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      const el = e.target as HTMLElement | null;
-      if (el?.tagName === "INPUT" || el?.tagName === "TEXTAREA" || el?.isContentEditable) return;
+      // Also bails while a modal is open: D/S/C used to act on the card behind
+      // the generator drawer.
+      if (shouldIgnoreShortcut(e)) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       const item = visible[cursor];
 

@@ -2,6 +2,7 @@ import db from "@/lib/db";
 import { toInteraction } from "@/lib/repo/rows";
 import type { Interaction, InteractionType, SignalKind } from "@/lib/types";
 import { rescoreOpportunity } from "@/lib/repo/opportunities";
+import { currentWorkspaceId } from "@/lib/repo/workspace";
 
 export interface MeetingListItem extends Interaction {
   customer_name: string;
@@ -16,8 +17,9 @@ export async function listMeetings(): Promise<MeetingListItem[]> {
             (SELECT COUNT(*)::int FROM commitments cm WHERE cm.interaction_id = i.id) AS actions_created,
             (SELECT COUNT(*)::int FROM signals s WHERE s.interaction_id = i.id) AS signal_count
      FROM interactions i JOIN customers c ON c.id = i.customer_id
-     WHERE i.type = 'meeting'
+     WHERE i.type = 'meeting' AND c.workspace_id = ?
      ORDER BY i.occurred_at DESC`,
+    await currentWorkspaceId(),
   );
   return rows.map((r) => ({ ...toInteraction(r), ...r } as unknown as MeetingListItem));
 }
@@ -25,8 +27,10 @@ export async function listMeetings(): Promise<MeetingListItem[]> {
 export async function getInteraction(id: number) {
   const row = await db.get(
     `SELECT i.*, c.name AS customer_name, c.company
-     FROM interactions i JOIN customers c ON c.id = i.customer_id WHERE i.id = ?`,
+     FROM interactions i JOIN customers c ON c.id = i.customer_id
+     WHERE i.id = ? AND c.workspace_id = ?`,
     id,
+    await currentWorkspaceId(),
   );
   if (!row) return null;
   return { ...toInteraction(row), customer_name: row.customer_name as string, company: row.company as string };
@@ -44,6 +48,13 @@ export async function createInteraction(input: {
   transcript?: string | null;
   aiSummary?: string | null;
 }): Promise<number> {
+  const owner = await db.get<{ id: number }>(
+    "SELECT id FROM customers WHERE id = ? AND workspace_id = ?",
+    input.customerId,
+    await currentWorkspaceId(),
+  );
+  if (!owner) throw new Error("Customer not found");
+
   const id = await db.insert(
     `INSERT INTO interactions
        (customer_id, opportunity_id, contact_id, type, direction, occurred_at, subject, body, transcript, ai_summary, ai_processed_at)
@@ -74,6 +85,13 @@ export async function createSignal(input: {
   detail?: string | null;
   strength?: number;
 }): Promise<number> {
+  const owner = await db.get<{ id: number }>(
+    "SELECT id FROM customers WHERE id = ? AND workspace_id = ?",
+    input.customerId,
+    await currentWorkspaceId(),
+  );
+  if (!owner) throw new Error("Customer not found");
+
   return db.insert(
     `INSERT INTO signals (customer_id, opportunity_id, interaction_id, kind, label, detail, strength)
      VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -90,11 +108,18 @@ export async function createSignal(input: {
 
 export async function resolveSignal(id: number) {
   await db.run(
-    `UPDATE signals SET resolved_at = to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD HH24:MI:SS') WHERE id = ?`,
+    `UPDATE signals SET resolved_at = to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD HH24:MI:SS')
+     WHERE id = ? AND customer_id IN (SELECT id FROM customers WHERE workspace_id = ?)`,
     id,
+    await currentWorkspaceId(),
   );
 }
 
 export async function signalsForInteraction(interactionId: number) {
-  return db.all("SELECT * FROM signals WHERE interaction_id = ?", interactionId);
+  return db.all(
+    `SELECT s.* FROM signals s JOIN customers c ON c.id = s.customer_id
+     WHERE s.interaction_id = ? AND c.workspace_id = ?`,
+    interactionId,
+    await currentWorkspaceId(),
+  );
 }

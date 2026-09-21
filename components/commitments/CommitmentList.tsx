@@ -133,7 +133,16 @@ function Row({
 
           {done ? (
             <button
-              onClick={() => startTransition(() => void reopenCommitmentAction(item.id))}
+              onClick={() =>
+                startTransition(async () => {
+                  try {
+                    await reopenCommitmentAction(item.id);
+                    toast(`Reopened — ${item.title}`);
+                  } catch {
+                    toast("Could not reopen that. Try again.", { tone: "risk" });
+                  }
+                })
+              }
               className="focus-ring rounded-[6px] border border-line px-2 py-1 text-[12px] hover:bg-sunken"
             >
               Reopen
@@ -151,7 +160,13 @@ function Row({
                 onClick={() => {
                   remove();
                   startTransition(async () => {
-                    await completeCommitmentAction(item.id);
+                    try {
+                      await completeCommitmentAction(item.id);
+                    } catch {
+                      restore();
+                      toast("Could not mark that done. Try again.", { tone: "risk" });
+                      return;
+                    }
                     toast(`Done — ${item.title}`, {
                       tone: "positive",
                       undo: () => {
@@ -223,15 +238,57 @@ function RowMenu({
   onUndo: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [date, setDate] = useState(item.due_date);
   const [, startTransition] = useTransition();
   const { toast } = useToast();
 
-  const snooze = (days: number) => {
+  const close = () => {
     setOpen(false);
+    setConfirmingDelete(false);
+  };
+
+  const snooze = (days: number) => {
+    close();
     onAct();
     startTransition(async () => {
-      await snoozeCommitmentAction(item.id, days);
-      toast(`Snoozed ${days} day${days === 1 ? "" : "s"}`, { undo: onUndo });
+      let previousDueDate: string | null = null;
+      try {
+        ({ previousDueDate } = await snoozeCommitmentAction(item.id, days));
+      } catch {
+        onUndo();
+        toast("Could not snooze that. Try again.", { tone: "risk" });
+        return;
+      }
+      /* Undo puts the original due date back on the server. It previously only
+         un-hid the row while leaving it snoozed. */
+      toast(`Snoozed ${days} day${days === 1 ? "" : "s"}`, {
+        undo: () => {
+          onUndo();
+          if (previousDueDate) {
+            startTransition(() => void rescheduleCommitmentAction(item.id, previousDueDate!));
+          }
+        },
+      });
+    });
+  };
+
+  /* Committed on the button, not on every `change` of the date input: change
+     fires as the field is edited, so the old version fired a server action per
+     keystroke and wrote an empty due_date if the field was cleared. */
+  const reschedule = () => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      toast("Pick a valid date first.", { tone: "risk" });
+      return;
+    }
+    close();
+    startTransition(async () => {
+      try {
+        await rescheduleCommitmentAction(item.id, date);
+        toast(`Moved to ${date}`);
+      } catch {
+        toast("Could not move that. Try again.", { tone: "risk" });
+      }
     });
   };
 
@@ -240,14 +297,15 @@ function RowMenu({
       <button
         onClick={() => setOpen((o) => !o)}
         aria-label="More actions"
+        aria-expanded={open}
         className="focus-ring rounded-[6px] border border-line px-1.5 py-1 text-[12px] text-ink-2 hover:bg-sunken"
       >
         ⋯
       </button>
       {open && (
         <>
-          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="anim-in absolute right-0 top-full z-20 mt-1 w-44 rounded-[8px] border border-line bg-card py-1 shadow-[var(--shadow-overlay)]">
+          <div className="fixed inset-0 z-10" onClick={close} />
+          <div className="anim-in absolute right-0 top-full z-20 mt-1 w-52 rounded-[8px] border border-line bg-card py-1 shadow-[var(--shadow-overlay)]">
             <div className="t-label px-3 py-1">Snooze</div>
             {[
               [1, "Tomorrow"],
@@ -259,39 +317,70 @@ function RowMenu({
               </button>
             ))}
             <div className="my-1 h-px bg-line-soft" />
-            <label className="block px-3 py-1.5 text-[13px] hover:bg-sunken">
-              Reschedule…
-              <input
-                type="date"
-                defaultValue={item.due_date}
-                onChange={(e) => {
-                  const date = e.target.value;
-                  setOpen(false);
-                  startTransition(async () => {
-                    await rescheduleCommitmentAction(item.id, date);
-                    toast(`Moved to ${date}`);
-                  });
-                }}
-                className="mt-1 w-full rounded border border-line px-1.5 py-1 text-[12px]"
-              />
-            </label>
+            <div className="px-3 py-1.5">
+              <label className="t-label block" htmlFor={`due-${item.id}`}>
+                Reschedule
+              </label>
+              <div className="mt-1 flex gap-1.5">
+                <input
+                  id={`due-${item.id}`}
+                  type="date"
+                  value={date}
+                  onChange={(e) => setDate(e.target.value)}
+                  className="focus-ring min-w-0 flex-1 rounded border border-line px-1.5 py-1 text-[12px]"
+                />
+                <button
+                  onClick={reschedule}
+                  className="focus-ring shrink-0 rounded-[6px] bg-brand px-2 py-1 text-[12px] font-medium text-white"
+                >
+                  Move
+                </button>
+              </div>
+            </div>
             <div className="my-1 h-px bg-line-soft" />
             <Link href={`/customers/${item.customer_id}`} className="block px-3 py-1.5 text-[13px] hover:bg-sunken">
               Open customer
             </Link>
-            <button
-              onClick={() => {
-                setOpen(false);
-                onAct();
-                startTransition(async () => {
-                  await deleteCommitmentAction(item.id);
-                  toast("Deleted", { tone: "risk" });
-                });
-              }}
-              className="block w-full px-3 py-1.5 text-left text-[13px] text-risk hover:bg-risk-tint"
-            >
-              Delete
-            </button>
+            {/* Delete is a hard delete with no undo, so it asks first — the
+                rest of the app confirms destructive actions and this did not. */}
+            {confirmingDelete ? (
+              <div className="px-3 py-1.5">
+                <p className="text-[12px] text-risk">Delete permanently? This cannot be undone.</p>
+                <div className="mt-1.5 flex gap-1.5">
+                  <button
+                    onClick={() => {
+                      close();
+                      onAct();
+                      startTransition(async () => {
+                        try {
+                          await deleteCommitmentAction(item.id);
+                          toast("Deleted", { tone: "risk" });
+                        } catch {
+                          onUndo();
+                          toast("Could not delete that. Try again.", { tone: "risk" });
+                        }
+                      });
+                    }}
+                    className="focus-ring rounded-[6px] bg-risk px-2 py-1 text-[12px] font-medium text-white"
+                  >
+                    Delete
+                  </button>
+                  <button
+                    onClick={() => setConfirmingDelete(false)}
+                    className="focus-ring rounded-[6px] border border-line px-2 py-1 text-[12px]"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                onClick={() => setConfirmingDelete(true)}
+                className="block w-full px-3 py-1.5 text-left text-[13px] text-risk hover:bg-risk-tint"
+              >
+                Delete…
+              </button>
+            )}
           </div>
         </>
       )}

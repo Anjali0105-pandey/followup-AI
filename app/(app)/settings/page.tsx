@@ -1,23 +1,35 @@
 import { currentUser } from "@/lib/repo/workspace";
 import { PageHeader, Badge, SectionTitle, Avatar } from "@/components/ui";
 import { PROVIDERS } from "@/lib/integrations";
-import { AI_MODE } from "@/lib/ai";
+
 import ReseedButton from "@/components/settings/ReseedButton";
+import ApiKeyForm from "@/components/settings/ApiKeyForm";
+import { effectiveAiMode, getKeyInfo } from "@/lib/repo/credentials";
 import db from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
 export default async function SettingsPage() {
-  // Postgres hands COUNT() back as a bigint string, so each one is cast to int
-  // — otherwise these render as strings and any arithmetic on them concatenates.
-  const [user, counts] = await Promise.all([
-    currentUser(),
-    db.get<{ c: number; o: number; m: number; i: number }>(
-      `SELECT (SELECT COUNT(*) FROM customers)::int c, (SELECT COUNT(*) FROM opportunities)::int o,
-              (SELECT COUNT(*) FROM commitments)::int m, (SELECT COUNT(*) FROM interactions)::int i`,
-    ),
-  ]);
+  const user = await currentUser();
+
+  // Scoped to this workspace, not the whole database. Postgres hands COUNT()
+  // back as a bigint string, so each one is cast to int — otherwise these
+  // render as strings and any arithmetic on them concatenates.
+  const counts = await db.get<{ c: number; o: number; m: number; i: number }>(
+    `SELECT (SELECT COUNT(*) FROM customers WHERE workspace_id = ?)::int c,
+            (SELECT COUNT(*) FROM opportunities o JOIN customers cu ON cu.id = o.customer_id
+              WHERE cu.workspace_id = ?)::int o,
+            (SELECT COUNT(*) FROM commitments cm JOIN customers cu ON cu.id = cm.customer_id
+              WHERE cu.workspace_id = ?)::int m,
+            (SELECT COUNT(*) FROM interactions i JOIN customers cu ON cu.id = i.customer_id
+              WHERE cu.workspace_id = ?)::int i`,
+    user.workspaceId,
+    user.workspaceId,
+    user.workspaceId,
+    user.workspaceId,
+  );
   const { c = 0, o = 0, m = 0, i = 0 } = counts ?? {};
+  const [keyInfo, aiMode] = await Promise.all([getKeyInfo(user.id), effectiveAiMode(user.id)]);
 
   return (
     <>
@@ -41,29 +53,32 @@ export default async function SettingsPage() {
         <section>
           <SectionTitle
             aside={
-              <Badge tone={AI_MODE === "live" ? "positive" : "attention"}>
-                {AI_MODE === "live" ? "Live model" : "Mock mode"}
+              <Badge tone={aiMode === "live" ? "positive" : "attention"}>
+                {aiMode === "live" ? "Live model" : "Mock mode"}
               </Badge>
             }
           >
             AI engine
           </SectionTitle>
-          <div className="card p-4">
-            <p className="text-[13px] leading-6 text-ink-2">
-              {AI_MODE === "live" ? (
-                <>
-                  Connected to Gemini 2.5 Flash. Meeting extraction, follow-up drafting and freeform answers all run
-                  against the live model.
-                </>
-              ) : (
-                <>
-                  No <code className="rounded bg-sunken px-1 text-[12px]">GEMINI_API_KEY</code> is set, so extraction and
-                  drafting run on local rule-based generation. Everything is fully usable — add a key to{" "}
-                  <code className="rounded bg-sunken px-1 text-[12px]">.env.local</code> and the same code paths switch to
-                  the live model with no other change.
-                </>
-              )}
-            </p>
+          <div className="space-y-3">
+            <div className="card p-4">
+              <p className="text-[13px] leading-6 text-ink-2">
+                {aiMode === "live" ? (
+                  <>
+                    Running against the live model. Meeting extraction, follow-up drafting and freeform answers all
+                    call Gemini{keyInfo.hint ? " using your own key below" : " using the server-wide key"}.
+                  </>
+                ) : (
+                  <>
+                    No server-wide key is set, so extraction and drafting run on local rule-based generation. Everything
+                    is fully usable — add your own key below and the same code paths switch to the live model with no
+                    other change.
+                  </>
+                )}
+              </p>
+            </div>
+
+            <ApiKeyForm initial={keyInfo} />
           </div>
         </section>
 

@@ -32,6 +32,10 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+# ...but the example must be committed: it is the only record of which
+# variables the app needs, and `.env*` was excluding it, so a fresh clone got
+# no setup documentation at all.
+!.env.local.example
 
 # vercel
 .vercel

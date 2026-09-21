@@ -1,5 +1,6 @@
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, ThinkingLevel, Type } from "@google/genai";
 import type { CommitmentKind, SignalKind } from "@/lib/types";
+import { logError } from "@/lib/log";
 
 // No API key: run in mock mode so the whole product is demoable without
 // billing. Unlike a stub that returns "[MOCK] add an API key", these mocks are
@@ -7,11 +8,92 @@ import type { CommitmentKind, SignalKind } from "@/lib/types";
 // a demo that shows placeholder text is not a demo. Set GEMINI_API_KEY and
 // every function below switches to the real model with no code change.
 const MOCK_MODE = !process.env.GEMINI_API_KEY;
-const genAI = MOCK_MODE ? null : new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
+/** Whether a *server-wide* key exists. A user's own key is resolved per call. */
 export const AI_MODE: "live" | "mock" = MOCK_MODE ? "mock" : "live";
 
-const MODEL = "gemini-2.5-flash";
+/**
+ * Resolve a client for this call. A key passed by the caller (the signed-in
+ * user's own, decrypted just-in-time) wins over the server-wide one; with
+ * neither, we fall through to mock mode.
+ *
+ * Clients are cached per key so a request does not pay to rebuild one, and the
+ * cache is keyed by the secret itself so one user's key can never serve
+ * another's request.
+ */
+const clients = new Map<string, GoogleGenAI>();
+
+function clientFor(userKey?: string | null): GoogleGenAI | null {
+  const apiKey = userKey?.trim() || process.env.GEMINI_API_KEY;
+  if (!apiKey) return null;
+  let client = clients.get(apiKey);
+  if (!client) {
+    client = new GoogleGenAI({ apiKey });
+    clients.set(apiKey, client);
+  }
+  return client;
+}
+
+/**
+ * gemini-2.5-flash was retired for new API keys — Google returns a 404 telling
+ * you to move to 3.6. Pinned rather than using the floating `gemini-flash-latest`
+ * alias, because the structured-output schemas below are the kind of thing a
+ * silent model swap can break. Override with GEMINI_MODEL to try a newer one.
+ */
+const MODEL = process.env.GEMINI_MODEL ?? "gemini-3.6-flash";
+
+/**
+ * Latency controls, shared by every call below.
+ *
+ * Two things dominated how long a generation took, and neither was the writing:
+ *
+ * 1. Thinking. The 3.x flash models reason before answering by default. That is
+ *    worth paying for on structured extraction, where a missed commitment is
+ *    the whole failure mode; it is not worth paying for a three-paragraph
+ *    email, where it doubled the wait for no measurable gain in the draft. So
+ *    drafting and refinement run at a low thinking level and extraction keeps
+ *    the default.
+ *
+ * 2. No upper bound. A stalled provider call had nothing to stop it, so the
+ *    generator drawer could sit on its skeleton indefinitely. Every call now
+ *    fails after GEMINI_TIMEOUT_MS (default 45s) — long enough for a big
+ *    transcript, short enough that the rep gets an error and a retry rather
+ *    than a dead screen.
+ *
+ * Both are env-overridable so a slow or fast model can be tuned without a
+ * code change.
+ */
+const TIMEOUT_MS = Number(process.env.GEMINI_TIMEOUT_MS ?? 45_000);
+
+/**
+ * Thinking level for short-form writing. GEMINI_WRITE_THINKING accepts
+ * minimal | low | medium | high, or "default" to leave the model's own
+ * behaviour alone.
+ */
+const WRITE_THINKING: ThinkingLevel | "default" = (() => {
+  const raw = (process.env.GEMINI_WRITE_THINKING ?? "low").trim().toLowerCase();
+  if (raw === "default") return "default";
+  const levels: Record<string, ThinkingLevel> = {
+    minimal: ThinkingLevel.MINIMAL,
+    low: ThinkingLevel.LOW,
+    medium: ThinkingLevel.MEDIUM,
+    high: ThinkingLevel.HIGH,
+  };
+  return levels[raw] ?? ThinkingLevel.LOW;
+})();
+
+/** `AbortSignal.timeout` bounds the wait; the SDK surfaces it as a rejection. */
+function limits() {
+  return { abortSignal: AbortSignal.timeout(TIMEOUT_MS) };
+}
+
+/** Config for the calls that write prose rather than extract structure. */
+function writeConfig() {
+  return {
+    ...limits(),
+    ...(WRITE_THINKING === "default" ? {} : { thinkingConfig: { thinkingLevel: WRITE_THINKING } }),
+  };
+}
 
 function safeJsonParse<T>(text: string, fallback: T): T {
   try {
@@ -276,12 +358,16 @@ export async function extractMeeting(
   transcript: string,
   notes: string,
   existingFacts: Record<string, string>,
+  apiKey?: string | null,
 ): Promise<MeetingExtraction> {
-  if (MOCK_MODE || !genAI) return mockExtract(transcript, notes);
+  const genAI = clientFor(apiKey);
+  if (!genAI) return mockExtract(transcript, notes);
 
-  const response = await genAI.models.generateContent({
-    model: MODEL,
-    contents: `You are a sales analyst. Extract structured intelligence from this customer meeting.
+  let response;
+  try {
+    response = await genAI.models.generateContent({
+      model: MODEL,
+      contents: `You are a sales analyst. Extract structured intelligence from this customer meeting.
 
 Known facts about this customer so far: ${JSON.stringify(existingFacts)}
 
@@ -291,8 +377,17 @@ Transcript:
 ${transcript || "(none — work from the notes)"}
 
 Be precise. Never invent a commitment that was not actually promised.`,
-    config: { responseMimeType: "application/json", responseSchema: EXTRACT_SCHEMA },
-  });
+      // Extraction keeps the model's default thinking: missing a commitment is
+      // the failure this whole feature exists to prevent.
+      config: { ...limits(), responseMimeType: "application/json", responseSchema: EXTRACT_SCHEMA },
+    });
+  } catch (error) {
+    /* A provider failure must not read as "this meeting contained no
+       commitments" — that is the one outcome the rep would trust and act on.
+       Surfacing it lets the form show an error and keep the transcript. */
+    logError("ai.extractMeeting", error, { model: MODEL, transcriptChars: transcript.length });
+    throw new Error("The AI could not read this meeting. Check your API key in Settings, then try again.");
+  }
 
   const parsed = safeJsonParse<Omit<MeetingExtraction, "updated_facts"> & { updated_facts_json: string }>(
     response.text ?? "{}",
@@ -425,10 +520,16 @@ function mockMessage(channel: MessageChannel, ctx: MessageContext): string {
   ].join("\n");
 }
 
-export async function generateMessage(channel: MessageChannel, ctx: MessageContext): Promise<string> {
-  if (MOCK_MODE || !genAI) return mockMessage(channel, ctx);
+export async function generateMessage(
+  channel: MessageChannel,
+  ctx: MessageContext,
+  apiKey?: string | null,
+): Promise<string> {
+  const genAI = clientFor(apiKey);
+  if (!genAI) return mockMessage(channel, ctx);
 
-  const response = await genAI.models.generateContent({
+  try {
+    const response = await genAI.models.generateContent({
     model: MODEL,
     contents: `You are drafting a sales follow-up on behalf of ${ctx.repName}.
 
@@ -444,9 +545,13 @@ Known facts: ${JSON.stringify(ctx.facts)}
 ${CHANNEL_INSTRUCTIONS[channel]}
 
 Reference actual specifics above. Never write generic filler like "just checking in". Output only the message.`,
-  });
-
-  return response.text ?? "";
+      config: writeConfig(),
+    });
+    return response.text ?? "";
+  } catch (error) {
+    logError("ai.generateMessage", error, { model: MODEL, channel });
+    throw new Error("The AI could not draft this message. Check your API key in Settings, then try again.");
+  }
 }
 
 const REFINEMENTS: Record<string, string> = {
@@ -456,10 +561,15 @@ const REFINEMENTS: Record<string, string> = {
   formal: "Make the tone more formal and suitable for a senior executive.",
 };
 
-export async function refineMessage(previous: string, instructionKey: string): Promise<string> {
+export async function refineMessage(
+  previous: string,
+  instructionKey: string,
+  apiKey?: string | null,
+): Promise<string> {
   const instruction = REFINEMENTS[instructionKey] ?? instructionKey;
+  const genAI = clientFor(apiKey);
 
-  if (MOCK_MODE || !genAI) {
+  if (!genAI) {
     // Deterministic local transforms so refinement visibly does something.
     if (instructionKey === "shorter") {
       const lines = previous.split("\n").filter((l) => l.trim());
@@ -482,11 +592,17 @@ export async function refineMessage(previous: string, instructionKey: string): P
     return `${previous}\n\n(Formal tone applied.)`;
   }
 
-  const response = await genAI.models.generateContent({
-    model: MODEL,
-    contents: `Draft:\n\n${previous}\n\nRevise it: ${instruction}\n\nOutput only the revised message.`,
-  });
-  return response.text ?? "";
+  try {
+    const response = await genAI.models.generateContent({
+      model: MODEL,
+      contents: `Draft:\n\n${previous}\n\nRevise it: ${instruction}\n\nOutput only the revised message.`,
+      config: writeConfig(),
+    });
+    return response.text ?? "";
+  } catch (error) {
+    logError("ai.refineMessage", error, { model: MODEL, instructionKey });
+    throw new Error("The AI could not revise this draft. Try again.");
+  }
 }
 
 /* ============================================================
@@ -494,20 +610,34 @@ export async function refineMessage(previous: string, instructionKey: string): P
    router in lib/ask.ts cannot answer structurally.
    ============================================================ */
 
-export async function answerQuestion(question: string, context: string): Promise<string> {
-  if (MOCK_MODE || !genAI) {
+export async function answerQuestion(
+  question: string,
+  context: string,
+  apiKey?: string | null,
+): Promise<string> {
+  const genAI = clientFor(apiKey);
+  if (!genAI) {
     return `I can answer that from your pipeline data, but freeform reasoning needs a live model. Set GEMINI_API_KEY in .env.local to enable it. Here is the relevant context I found:\n\n${context.slice(0, 600)}`;
   }
 
-  const response = await genAI.models.generateContent({
-    model: MODEL,
-    contents: `A sales rep asked: "${question}"
+  try {
+    const response = await genAI.models.generateContent({
+      model: MODEL,
+      contents: `A sales rep asked: "${question}"
 
 Answer strictly from the pipeline data below. If it is not in the data, say so plainly.
 
 ${context}
 
 Answer in 2-4 sentences, no preamble.`,
-  });
-  return response.text ?? "";
+      config: writeConfig(),
+    });
+    return response.text ?? "";
+  } catch (error) {
+    /* Ask degrades rather than fails: the structured context is genuinely
+       useful on its own, and an error dialog over a question the rep can
+       partly answer from the data is a worse outcome. */
+    logError("ai.answerQuestion", error, { model: MODEL });
+    return `The model call failed, so here is the relevant pipeline data I found:\n\n${context.slice(0, 600)}`;
+  }
 }

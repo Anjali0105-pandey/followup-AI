@@ -8,6 +8,7 @@ import type { AskResult } from "@/lib/ask-shared";
 import { SUGGESTED_QUESTIONS } from "@/lib/ask-shared";
 import { useToast } from "@/components/shell/Toast";
 import { useGenerator } from "@/components/generator/GeneratorProvider";
+import { useOverlayLock } from "@/components/shell/useOverlay";
 
 const NAV = [
   { label: "Command Center", href: "/", hint: "⌘1" },
@@ -29,11 +30,14 @@ const NAV = [
 export default function AskPalette({ onClose }: { onClose: () => void }) {
   const [query, setQuery] = useState("");
   const [result, setResult] = useState<AskResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
   const inputRef = useRef<HTMLInputElement>(null);
   const router = useRouter();
   const { toast } = useToast();
   const { openGenerator } = useGenerator();
+
+  useOverlayLock();
 
   // Focusing an input is a DOM side effect, not derived state — and because
   // the parent unmounts this component on close, query/result reset for free.
@@ -45,12 +49,22 @@ export default function AskPalette({ onClose }: { onClose: () => void }) {
     ? NAV.filter((n) => n.label.toLowerCase().includes(query.toLowerCase()))
     : NAV.slice(0, 5);
 
-  function submit() {
-    const q = query.trim();
+  /* A rejected ask used to leave "Thinking…" on screen permanently, because
+     the rejection inside startTransition had no handler. */
+  function ask(q: string) {
     if (!q) return;
+    setError(null);
     startTransition(async () => {
-      setResult(await askAction(q));
+      try {
+        setResult(await askAction(q));
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Could not answer that. Try again.");
+      }
     });
+  }
+
+  function submit() {
+    ask(query.trim());
   }
 
   return (
@@ -78,7 +92,21 @@ export default function AskPalette({ onClose }: { onClose: () => void }) {
         </div>
 
         <div className="thin-scroll max-h-[58vh] overflow-y-auto">
-          {!result && (
+          {error && (
+            <div className="p-3">
+              <div className="card border-risk-line bg-risk-tint px-3 py-2.5" role="alert">
+                <p className="text-[13px] font-medium text-risk">{error}</p>
+                <button
+                  onClick={submit}
+                  className="focus-ring mt-2 rounded-[7px] border border-line bg-card px-2.5 py-1 text-[12px] hover:bg-sunken"
+                >
+                  Try again
+                </button>
+              </div>
+            </div>
+          )}
+
+          {!result && !error && (
             <>
               {navMatches.length > 0 && (
                 <Section label="Go to">
@@ -115,7 +143,7 @@ export default function AskPalette({ onClose }: { onClose: () => void }) {
                       key={s}
                       onClick={() => {
                         setQuery(s);
-                        startTransition(async () => setResult(await askAction(s)));
+                        ask(s);
                       }}
                       className="block w-full truncate rounded-[7px] px-2.5 py-2 text-left text-[13px] text-ink-2 hover:bg-sunken hover:text-ink"
                     >
@@ -127,7 +155,7 @@ export default function AskPalette({ onClose }: { onClose: () => void }) {
             </>
           )}
 
-          {result && (
+          {result && !error && (
             <div className="p-3">
               <div className="ai-block mb-3 px-3 py-2.5">
                 <div className="t-label mb-1 text-ai">✦ Answer</div>

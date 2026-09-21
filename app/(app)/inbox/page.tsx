@@ -1,6 +1,7 @@
 import Link from "next/link";
-import { PageHeader, Badge, AiMark } from "@/components/ui";
+import { PageHeader, Badge, AiMark, EmptyState } from "@/components/ui";
 import db from "@/lib/db";
+import { currentWorkspaceId } from "@/lib/repo/workspace";
 import { relativePast } from "@/lib/dates";
 
 export const dynamic = "force-dynamic";
@@ -13,12 +14,15 @@ export const dynamic = "force-dynamic";
  */
 export default async function InboxPage() {
   // SQLite's group_concat(x, sep) is string_agg(x, sep) in Postgres.
+  // The workspace filter is not optional: without it this page listed every
+  // tenant's inbound messages, bodies and detected signals to anyone signed in.
   const inbound = await db.all<Record<string, unknown>>(
     `SELECT i.*, c.company, c.id AS cid,
             (SELECT string_agg(s.kind || '|' || s.label, '§') FROM signals s WHERE s.interaction_id = i.id) AS sig
      FROM interactions i JOIN customers c ON c.id = i.customer_id
-     WHERE i.direction = 'inbound'
+     WHERE c.workspace_id = ? AND i.direction = 'inbound'
      ORDER BY i.occurred_at DESC`,
+    await currentWorkspaceId(),
   );
 
   return (
@@ -44,6 +48,13 @@ export default async function InboxPage() {
           Set up integrations
         </Link>
       </div>
+
+      {inbound.length === 0 && (
+        <EmptyState
+          title="No inbound messages yet"
+          body="Messages appear here once a customer replies in a logged thread, or once you connect an email channel."
+        />
+      )}
 
       <ul className="space-y-2">
         {inbound.map((m) => {

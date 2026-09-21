@@ -3,6 +3,7 @@ import { toOpportunity } from "@/lib/repo/rows";
 import type { Opportunity, Stage } from "@/lib/types";
 import { scoreOpportunity, maxDaysOverdue } from "@/lib/priority";
 import { daysBetween, today } from "@/lib/dates";
+import { currentWorkspaceId } from "@/lib/repo/workspace";
 
 export interface OpportunityView extends Opportunity {
   customer_name: string;
@@ -42,12 +43,15 @@ function decorate(r: Record<string, unknown>): OpportunityView {
 }
 
 export async function listOpportunities(): Promise<OpportunityView[]> {
-  const rows = await db.all(`${VIEW_SQL} ORDER BY o.priority_score DESC, o.value DESC`);
+  const rows = await db.all(
+    `${VIEW_SQL} WHERE c.workspace_id = ? ORDER BY o.priority_score DESC, o.value DESC`,
+    await currentWorkspaceId(),
+  );
   return rows.map(decorate);
 }
 
 export async function getOpportunity(id: number): Promise<OpportunityView | null> {
-  const row = await db.get(`${VIEW_SQL} WHERE o.id = ?`, id);
+  const row = await db.get(`${VIEW_SQL} WHERE o.id = ? AND c.workspace_id = ?`, id, await currentWorkspaceId());
   return row ? decorate(row) : null;
 }
 
@@ -63,6 +67,7 @@ const STAGE_PROBABILITY: Record<Stage, number> = {
 };
 
 export async function moveStage(id: number, stage: Stage) {
+  if (!(await ownsOpportunity(id))) return;
   await db.run(
     `UPDATE opportunities SET stage = ?, probability = ?, updated_at = now() WHERE id = ?`,
     stage,
@@ -72,10 +77,23 @@ export async function moveStage(id: number, stage: Stage) {
   await rescoreOpportunity(id);
 }
 
+/** True when the opportunity belongs to the caller's workspace. */
+async function ownsOpportunity(id: number): Promise<boolean> {
+  const row = await db.get<{ id: number }>(
+    `SELECT o.id FROM opportunities o JOIN customers c ON c.id = o.customer_id
+     WHERE o.id = ? AND c.workspace_id = ?`,
+    id,
+    await currentWorkspaceId(),
+  );
+  return Boolean(row);
+}
+
 /** Median open-deal value, the normaliser for the deal-size component. */
-async function pipelineMedian(): Promise<number> {
+async function pipelineMedian(workspaceId?: number): Promise<number> {
   const rows = await db.all<{ value: number }>(
-    "SELECT value FROM opportunities WHERE stage NOT IN ('won','lost') ORDER BY value",
+    `SELECT o.value FROM opportunities o JOIN customers c ON c.id = o.customer_id
+     WHERE c.workspace_id = ? AND o.stage NOT IN ('won','lost') ORDER BY o.value`,
+    workspaceId ?? (await currentWorkspaceId()),
   );
   if (rows.length === 0) return 10_000;
   return rows[Math.floor(rows.length / 2)].value;
@@ -86,8 +104,13 @@ async function pipelineMedian(): Promise<number> {
  * interaction, commitment change, stage move) — never on page load, so list
  * screens stay a pure read of cached columns.
  */
-export async function rescoreOpportunity(id: number, median?: number) {
-  const opp = await db.get("SELECT * FROM opportunities WHERE id = ?", id);
+export async function rescoreOpportunity(id: number, median?: number, workspaceId?: number) {
+  const opp = await db.get(
+    `SELECT o.* FROM opportunities o JOIN customers c ON c.id = o.customer_id
+     WHERE o.id = ? AND c.workspace_id = ?`,
+    id,
+    workspaceId ?? (await currentWorkspaceId()),
+  );
   if (!opp) return;
   const stage = opp.stage as Stage;
 
@@ -123,7 +146,7 @@ export async function rescoreOpportunity(id: number, median?: number) {
 
   const result = scoreOpportunity({
     value: opp.value as number,
-    pipelineMedian: median ?? (await pipelineMedian()),
+    pipelineMedian: median ?? (await pipelineMedian(workspaceId)),
     stage,
     probability: opp.probability as number,
     daysOverdue: maxDaysOverdue(openMine.map((c) => c.due_date)),
@@ -159,18 +182,29 @@ export async function rescoreOpportunity(id: number, median?: number) {
   await db.run("UPDATE customers SET health = ? WHERE id = ?", health, opp.customer_id as number);
 }
 
-export async function rescoreAll() {
-  const median = await pipelineMedian();
-  const ids = await db.all<{ id: number }>("SELECT id FROM opportunities");
-  for (const { id } of ids) await rescoreOpportunity(id, median);
+/**
+ * `workspaceId` is passed explicitly by the seed script, which runs from the
+ * CLI where there is no Clerk session to derive a tenant from.
+ */
+export async function rescoreAll(workspaceId?: number) {
+  const ws = workspaceId ?? (await currentWorkspaceId());
+  const median = await pipelineMedian(ws);
+  const ids = await db.all<{ id: number }>(
+    `SELECT o.id FROM opportunities o JOIN customers c ON c.id = o.customer_id
+     WHERE c.workspace_id = ?`,
+    ws,
+  );
+  for (const { id } of ids) await rescoreOpportunity(id, median, ws);
 }
 
 /** The opportunity a commitment or interaction should attach to by default. */
 export async function primaryOpportunityFor(customerId: number): Promise<number | null> {
   const row = await db.get<{ id: number }>(
-    `SELECT id FROM opportunities WHERE customer_id = ? AND stage NOT IN ('won','lost')
-     ORDER BY value DESC LIMIT 1`,
+    `SELECT o.id FROM opportunities o JOIN customers c ON c.id = o.customer_id
+     WHERE o.customer_id = ? AND c.workspace_id = ? AND o.stage NOT IN ('won','lost')
+     ORDER BY o.value DESC LIMIT 1`,
     customerId,
+    await currentWorkspaceId(),
   );
   return row?.id ?? null;
 }

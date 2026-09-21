@@ -12,6 +12,8 @@ import { Avatar, Badge, HealthPill, PriorityChip, SectionTitle, StageBadge, AiMa
 import CustomerTabs from "@/components/customer/CustomerTabs";
 import CustomerActions from "@/components/customer/CustomerActions";
 import Timeline from "@/components/customer/Timeline";
+import SignalList from "@/components/customer/SignalList";
+import AddFollowUp from "@/components/customer/AddFollowUp";
 import CommitmentList from "@/components/commitments/CommitmentList";
 import { money } from "@/lib/format";
 import { relativeDue, relativePast } from "@/lib/dates";
@@ -83,7 +85,10 @@ export default async function Customer360(props: PageProps<"/customers/[id]">) {
             </div>
 
             <div className="flex flex-col items-end gap-2">
-              <CustomerActions customerId={customerId} />
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <AddFollowUp customerId={customerId} />
+                <CustomerActions customerId={customerId} />
+              </div>
               {openOpp && (
                 <div className="text-right">
                   <div className="tabular text-[20px] font-semibold leading-none">{money(openOpp.value)}</div>
@@ -107,7 +112,10 @@ export default async function Customer360(props: PageProps<"/customers/[id]">) {
                   </span>
                 </>
               ) : (
-                <span className="text-attention">Nothing scheduled — book one</span>
+                <span className="text-attention">
+                  Nothing scheduled —{" "}
+                  <AddFollowUp customerId={customerId} variant="link" label="book one" />
+                </span>
               )}
             </Fact>
             <Fact label="Last interaction">{relativePast(interactions[0]?.occurred_at ?? null)}</Fact>
@@ -145,19 +153,7 @@ export default async function Customer360(props: PageProps<"/customers/[id]">) {
                     return (
                       <section key={sec.kind}>
                         <SectionTitle>{sec.title}</SectionTitle>
-                        <ul className="card divide-y divide-line-soft">
-                          {rows.map((s) => (
-                            <li key={s.id} className="px-4 py-2.5">
-                              <div className="flex items-start justify-between gap-3">
-                                <div className="min-w-0">
-                                  <p className="text-[13.5px]">{s.label}</p>
-                                  {s.detail && <p className="t-meta mt-0.5 text-[12.5px]">{s.detail}</p>}
-                                </div>
-                                <Badge tone={sec.tone}>{"●".repeat(s.strength)}</Badge>
-                              </div>
-                            </li>
-                          ))}
-                        </ul>
+                        <SignalList signals={rows} tone={sec.tone} />
                       </section>
                     );
                   })}
@@ -257,7 +253,9 @@ export default async function Customer360(props: PageProps<"/customers/[id]">) {
               commitments.length > 0 ? (
                 <CommitmentList items={commitments} showOwner groupByDue />
               ) : (
-                <EmptyState title="No commitments" body="Nothing promised in either direction." />
+                <EmptyState title="No commitments" body="Nothing promised in either direction — yet.">
+                  <AddFollowUp customerId={customerId} label="Add the first one" />
+                </EmptyState>
               ),
           },
         ]}

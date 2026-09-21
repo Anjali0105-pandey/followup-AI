@@ -1,7 +1,21 @@
 // Importing this from a Client Component is always a bug — `server-only`
 // turns that into a build error instead of a confusing bundler failure.
 import "server-only";
+import dns from "node:dns";
+import net from "node:net";
 import { Pool, type QueryResultRow } from "pg";
+
+/* Neon publishes both A and AAAA records. On a network with no working IPv6
+   route to AWS, every connection stalls until the timeout.
+ *
+ * Preferring A records is not enough on its own: Node's Happy Eyeballs
+ * (autoSelectFamily, on by default since v20) races both families and ignores
+ * the resolver order, so the dead IPv6 attempt still blocks. Measured on a
+ * broken-IPv6 network: ipv4first alone timed out at 15s, while turning the
+ * race off connected in 3s. Where IPv6 does work this simply uses the first
+ * A record, which is what we want anyway. */
+dns.setDefaultResultOrder("ipv4first");
+net.setDefaultAutoSelectFamily(false);
 
 /**
  * Postgres access layer.
@@ -28,15 +42,28 @@ function createPool(): Pool {
   }
   return new Pool({
     connectionString,
-    // Neon's pooled endpoint does the heavy lifting; a small local ceiling
-    // keeps serverless instances from each opening a wide pool.
-    max: 5,
-    idleTimeoutMillis: 30_000,
+    /* Opening a connection to Neon costs ~1.7s from a distant region (TLS +
+       auth), against ~280ms for a query on an established one. So the pool is
+       sized and kept alive to avoid reconnecting, not to cap concurrency:
+       `max` sits above the widest parallel wave (computeInsights issues 8 at
+       once) so queries never queue behind each other, and the idle timeout is
+       long enough that a browsing session reuses warm connections instead of
+       paying the handshake on every page. Safe against the `-pooler` endpoint,
+       which multiplexes server-side. */
+    max: 12,
+    idleTimeoutMillis: 5 * 60_000,
+    keepAlive: true,
   });
 }
 
 const pool = globalThis.__followupPool ?? createPool();
-if (process.env.NODE_ENV !== "production") globalThis.__followupPool = pool;
+if (process.env.NODE_ENV !== "production") {
+  globalThis.__followupPool = pool;
+  /* Open a few connections up front so the first page a developer hits does
+     not pay the handshake serially. Deliberately not awaited and deliberately
+     dev-only — a serverless instance should connect on demand. */
+  void Promise.all(Array.from({ length: 4 }, () => pool.query("SELECT 1"))).catch(() => {});
+}
 
 /** `SELECT ... WHERE x = ?` → `SELECT ... WHERE x = $1`. */
 function toPg(sql: string): string {
@@ -44,25 +71,41 @@ function toPg(sql: string): string {
   return sql.replace(/\?/g, () => `$${++i}`);
 }
 
+/**
+ * DEBUG_SQL=1 logs every statement with its duration. Against a remote
+ * database the query count matters more than query cost — each round-trip is
+ * a fixed network toll — so this prints a running count to make an N+1 or an
+ * accidentally sequential await chain obvious.
+ */
+const DEBUG_SQL = process.env.DEBUG_SQL === "1";
+let queryCount = 0;
+
+async function timed<T>(sql: string, run: () => Promise<T>): Promise<T> {
+  if (!DEBUG_SQL) return run();
+  const started = performance.now();
+  const out = await run();
+  const ms = Math.round(performance.now() - started);
+  const label = sql.trim().replace(/\s+/g, " ").slice(0, 70);
+  console.log(`[sql ${String(++queryCount).padStart(3)}] ${String(ms).padStart(5)}ms  ${label}`);
+  return out;
+}
+
 export async function all<T extends QueryResultRow = QueryResultRow>(
   sql: string,
   ...params: unknown[]
 ): Promise<T[]> {
-  const res = await pool.query<T>(toPg(sql), params);
-  return res.rows;
+  return timed(sql, async () => (await pool.query<T>(toPg(sql), params)).rows);
 }
 
 export async function get<T extends QueryResultRow = QueryResultRow>(
   sql: string,
   ...params: unknown[]
 ): Promise<T | undefined> {
-  const res = await pool.query<T>(toPg(sql), params);
-  return res.rows[0];
+  return timed(sql, async () => (await pool.query<T>(toPg(sql), params)).rows[0]);
 }
 
 export async function run(sql: string, ...params: unknown[]): Promise<number> {
-  const res = await pool.query(toPg(sql), params);
-  return res.rowCount ?? 0;
+  return timed(sql, async () => (await pool.query(toPg(sql), params)).rowCount ?? 0);
 }
 
 /** For INSERTs. The statement must end with `RETURNING id`. */

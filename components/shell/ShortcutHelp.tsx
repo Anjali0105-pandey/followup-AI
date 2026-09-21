@@ -1,5 +1,9 @@
 "use client";
 
+import { useEffect } from "react";
+
+import { useOverlayLock } from "@/components/shell/useOverlay";
+
 const GROUPS = [
   {
     label: "Navigate",
@@ -25,6 +29,18 @@ const GROUPS = [
 ];
 
 export default function ShortcutHelp({ onClose }: { onClose: () => void }) {
+  useOverlayLock();
+
+  /* This dialog documents "Esc — close any overlay" but had no Escape handler
+     of its own, so Esc was the one shortcut the shortcut sheet ignored. */
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   return (
     <div className="fixed inset-0 z-[75]" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
       <div className="absolute inset-0 bg-ink/25" onClick={onClose} />

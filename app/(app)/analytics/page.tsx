@@ -4,6 +4,7 @@ import { listOpportunities } from "@/lib/repo/opportunities";
 import { STAGES, STAGE_LABEL } from "@/lib/types";
 import { money, moneyShort } from "@/lib/format";
 import { today } from "@/lib/dates";
+import { currentWorkspaceId } from "@/lib/repo/workspace";
 
 export const dynamic = "force-dynamic";
 
@@ -11,15 +12,29 @@ export default async function AnalyticsPage() {
   // COUNT() arrives as a bigint string from the driver, so every aggregate is
   // cast; `due_date` is a 'YYYY-MM-DD' text column, so today is passed in as a
   // parameter rather than compared against now().
+  //
+  // Each aggregate joins customers and filters on workspace_id. Without that
+  // these three counted every tenant's rows, so "commitments kept" and
+  // "activity by channel" were whole-database figures rather than this
+  // workspace's — wrong numbers *and* a cross-tenant disclosure.
+  const ws = await currentWorkspaceId();
   const [opportunities, keptRow, missedRow, byChannel] = await Promise.all([
     listOpportunities(),
-    db.get<{ n: number }>("SELECT COUNT(*)::int n FROM commitments WHERE owner='me' AND status='done'"),
     db.get<{ n: number }>(
-      "SELECT COUNT(*)::int n FROM commitments WHERE owner='me' AND status IN ('open','snoozed') AND due_date < ?",
+      `SELECT COUNT(*)::int n FROM commitments cm JOIN customers c ON c.id = cm.customer_id
+       WHERE c.workspace_id = ? AND cm.owner='me' AND cm.status='done'`,
+      ws,
+    ),
+    db.get<{ n: number }>(
+      `SELECT COUNT(*)::int n FROM commitments cm JOIN customers c ON c.id = cm.customer_id
+       WHERE c.workspace_id = ? AND cm.owner='me' AND cm.status IN ('open','snoozed') AND cm.due_date < ?`,
+      ws,
       today(),
     ),
     db.all<{ type: string; n: number }>(
-      "SELECT type, COUNT(*)::int n FROM interactions GROUP BY type ORDER BY n DESC",
+      `SELECT i.type, COUNT(*)::int n FROM interactions i JOIN customers c ON c.id = i.customer_id
+       WHERE c.workspace_id = ? GROUP BY i.type ORDER BY n DESC`,
+      ws,
     ),
   ]);
 

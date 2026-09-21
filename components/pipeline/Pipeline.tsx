@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useOptimistic, useState, useTransition } from "react";
 import Link from "next/link";
 import type { OpportunityView } from "@/lib/repo/opportunities";
 import type { Stage } from "@/lib/types";
@@ -20,26 +20,42 @@ const HEALTH_DOT: Record<string, string> = {
 
 export default function Pipeline({ opportunities }: { opportunities: OpportunityView[] }) {
   const [view, setView] = useState<"kanban" | "list">("kanban");
-  const [items, setItems] = useState(opportunities);
   const [dragging, setDragging] = useState<number | null>(null);
   const [, startTransition] = useTransition();
   const { toast } = useToast();
+
+  /* useOptimistic rather than useState(opportunities): the card has to land in
+     its new column instantly, but the server result must win once it arrives.
+     A plain useState copy was seeded from props and never re-synced, so the
+     re-scored priority and account health that a stage move produces stayed
+     invisible until a hard reload — and a failed move left the card showing a
+     stage it never reached. React discards the optimistic value when the
+     transition settles, either way. */
+  const [items, applyMove] = useOptimistic(
+    opportunities,
+    (list: OpportunityView[], move: { id: number; stage: Stage }) =>
+      list.map((o) => (o.id === move.id ? { ...o, stage: move.stage } : o)),
+  );
 
   function move(id: number, stage: Stage) {
     const opp = items.find((o) => o.id === id);
     if (!opp || opp.stage === stage) return;
     const previous = opp.stage;
 
-    // Optimistic: the card lands in the new column immediately, and the
-    // server call reconciles (and re-scores) behind it.
-    setItems((list) => list.map((o) => (o.id === id ? { ...o, stage } : o)));
     startTransition(async () => {
-      await moveStageAction(id, stage);
+      applyMove({ id, stage });
+      try {
+        await moveStageAction(id, stage);
+      } catch {
+        toast(`Could not move ${opp.company}. Try again.`, { tone: "risk" });
+        return;
+      }
       toast(`${opp.company} moved to ${STAGE_LABEL[stage]}`, {
-        undo: () => {
-          setItems((list) => list.map((o) => (o.id === id ? { ...o, stage: previous } : o)));
-          startTransition(() => void moveStageAction(id, previous));
-        },
+        undo: () =>
+          startTransition(async () => {
+            applyMove({ id, stage: previous });
+            await moveStageAction(id, previous);
+          }),
       });
     });
   }
@@ -60,7 +76,11 @@ export default function Pipeline({ opportunities }: { opportunities: Opportunity
             </button>
           ))}
         </div>
-        <p className="t-meta text-[12px]">Drag a card to change stage — probability and priority update automatically.</p>
+        <p className="t-meta text-[12px]">
+          <span className="hidden lg:inline">Drag a card to change stage</span>
+          <span className="lg:hidden">Use List view to change stage on touch</span>
+          {" — probability and priority update automatically."}
+        </p>
       </div>
 
       {view === "kanban" ? (

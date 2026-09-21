@@ -1,7 +1,7 @@
 "use client";
 
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useCallback } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { STAGES, STAGE_LABEL } from "@/lib/types";
 import { COMMITMENT_KIND_LABEL } from "@/lib/types";
 
@@ -15,11 +15,22 @@ export interface TabDef {
  * Tabs and filters write to the URL rather than component state, so a filtered
  * view is shareable, bookmarkable, and survives back/forward.
  */
-export function Tabs({ tabs, param = "tab" }: { tabs: TabDef[]; param?: string }) {
+export function Tabs({
+  tabs,
+  param = "tab",
+  defaultTab,
+}: {
+  tabs: TabDef[];
+  param?: string;
+  /** The tab the page shows when the URL carries none. Must match the page's
+      own default, or the highlighted tab disagrees with the data below it —
+      Follow-ups defaults to "today" while this component highlighted "All". */
+  defaultTab?: string;
+}) {
   const router = useRouter();
   const pathname = usePathname();
   const params = useSearchParams();
-  const active = params.get(param) ?? tabs[0].key;
+  const active = params.get(param) ?? defaultTab ?? tabs[0].key;
 
   const set = useCallback(
     (key: string) => {
@@ -67,20 +78,50 @@ export function Filters({ customers }: { customers: { id: number; company: strin
   const pathname = usePathname();
   const params = useSearchParams();
 
-  const set = (key: string, value: string) => {
-    const next = new URLSearchParams(params.toString());
-    if (value) next.set(key, value);
-    else next.delete(key);
-    router.push(`${pathname}?${next.toString()}`, { scroll: false });
-  };
+  const set = useCallback(
+    (key: string, value: string) => {
+      const next = new URLSearchParams(params.toString());
+      if (value) next.set(key, value);
+      else next.delete(key);
+      router.push(`${pathname}?${next.toString()}`, { scroll: false });
+    },
+    [params, pathname, router],
+  );
+
+  /* The search box is controlled locally and pushed to the URL on a debounce.
+     It used to push on every keystroke, and each push re-ran the whole page on
+     the server — eight queries against a remote database per character typed,
+     which made typing visibly lag and could drop characters as the server
+     component re-rendered under the cursor. */
+  const urlQuery = params.get("q") ?? "";
+  const [search, setSearch] = useState(urlQuery);
+  const typing = useRef(false);
+
+  // Adopt the URL value when it changes from outside (Clear filters, back/forward).
+  useEffect(() => {
+    if (!typing.current) setSearch(urlQuery);
+  }, [urlQuery]);
+
+  useEffect(() => {
+    if (search === urlQuery) return;
+    const id = setTimeout(() => {
+      typing.current = false;
+      set("q", search);
+    }, 350);
+    return () => clearTimeout(id);
+  }, [search, urlQuery, set]);
 
   const active = ["priority", "stage", "customer", "kind", "minValue", "q"].filter((k) => params.get(k));
 
   return (
     <div className="flex flex-wrap items-center gap-2 py-3">
       <input
-        defaultValue={params.get("q") ?? ""}
-        onChange={(e) => set("q", e.target.value)}
+        value={search}
+        onChange={(e) => {
+          typing.current = true;
+          setSearch(e.target.value);
+        }}
+        aria-label="Search follow-ups"
         placeholder="Search follow-ups…"
         className="focus-ring h-8 w-48 rounded-[7px] border border-line bg-card px-2.5 text-[13px] outline-none placeholder:text-ink-3"
       />
@@ -98,6 +139,8 @@ export function Filters({ customers }: { customers: { id: number; company: strin
       {active.length > 0 && (
         <button
           onClick={() => {
+            typing.current = false;
+            setSearch("");
             const next = new URLSearchParams();
             const tab = params.get("tab");
             if (tab) next.set("tab", tab);

@@ -8,6 +8,14 @@ import { computeInsights } from "@/lib/repo/insights";
 import { getCustomer, getCustomerByName, listInteractions, listSignals } from "@/lib/repo/customers";
 import { moneyShort } from "@/lib/format";
 import { relativeDue, relativePast, today } from "@/lib/dates";
+import { currentUser, currentWorkspaceId } from "@/lib/repo/workspace";
+import { getDecryptedApiKeyForServerUse } from "@/lib/repo/credentials";
+
+/** The asking user's own key, when they have supplied one. */
+async function currentUserApiKey(): Promise<string | null> {
+  const user = await currentUser();
+  return getDecryptedApiKeyForServerUse(user.id);
+}
 
 /**
  * Natural-language ask. The point is that answers are *actionable*, not chat:
@@ -123,10 +131,11 @@ const HANDLERS: Handler[] = [
     const rows = await db.all(
       `SELECT o.id, o.value, o.stage, o.last_interaction_at, c.id AS cid, c.company
        FROM opportunities o JOIN customers c ON c.id = o.customer_id
-       WHERE o.stage NOT IN ('won','lost') AND o.value >= ?
+       WHERE c.workspace_id = ? AND o.stage NOT IN ('won','lost') AND o.value >= ?
          AND (?::int = 0 OR o.last_interaction_at IS NULL
               OR (CURRENT_DATE - LEFT(o.last_interaction_at, 10)::date) >= ?::int)
        ORDER BY o.value DESC`,
+      await currentWorkspaceId(),
       min,
       days,
       days,
@@ -196,21 +205,32 @@ const HANDLERS: Handler[] = [
   },
 ];
 
+/** Regex metacharacters in a name would otherwise change the pattern's meaning
+    — or throw outright, taking the whole Ask down. Names reach us from AI
+    extraction and free-text entry, so they are not safe to interpolate raw. */
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 /** Match a customer, contact, or company named anywhere in the question. */
 async function findCustomer(q: string) {
+  const ws = await currentWorkspaceId();
   const rows = await db.all<{ id: number; name: string; company: string }>(
-    "SELECT id, name, company FROM customers",
+    "SELECT id, name, company FROM customers WHERE workspace_id = ?",
+    ws,
   );
   const direct = rows.find((r) => q.includes(r.name.toLowerCase()) || q.includes(r.company.toLowerCase()));
   if (direct) return getCustomerByName(direct.name);
 
   // Fall back to a contact's first name ("what did John say about pricing?").
   const contact = await db.all<{ customer_id: number; name: string }>(
-    "SELECT customer_id, name FROM contacts",
+    `SELECT ct.customer_id, ct.name FROM contacts ct JOIN customers c ON c.id = ct.customer_id
+     WHERE c.workspace_id = ?`,
+    ws,
   );
   const byContact = contact.find((c) => {
     const first = c.name.split(" ")[0].toLowerCase();
-    return first.length > 2 && new RegExp(`\\b${first}\\b`).test(q);
+    return first.length > 2 && new RegExp(`\\b${escapeRegExp(first)}\\b`).test(q);
   });
   if (!byContact) return null;
   // getCustomer already decodes `facts`, so the hand-rolled parse is gone.
@@ -243,7 +263,7 @@ export async function ask(question: string): Promise<AskResult> {
     return {
       intent: "freeform",
       freeform: true,
-      answer: await answerQuestion(question, context),
+      answer: await answerQuestion(question, context, await currentUserApiKey()),
       items: [{ title: `Open ${customer.company}`, subtitle: "Full account history", href: `/customers/${customer.id}` }],
     };
   }

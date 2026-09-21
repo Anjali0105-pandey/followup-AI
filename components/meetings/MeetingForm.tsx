@@ -21,6 +21,12 @@ Anjali: Perfect — let's schedule that for Thursday.`;
 
 type Step = "form" | "extracting" | "review";
 
+/* Guards against a dropped file that is not a transcript. A .txt/.vtt/.srt/.md
+   file is read as text; anything else (a PDF, an image, a 200MB archive) used
+   to be decoded as UTF-8 and pasted into the textarea as binary noise. */
+const TRANSCRIPT_EXT = /\.(txt|vtt|srt|md|log|csv)$/i;
+const MAX_TRANSCRIPT_BYTES = 2 * 1024 * 1024;
+
 /**
  * The core loop in one screen: transcript in → structured intelligence out →
  * commitments created. Nothing is written to the database until the rep
@@ -28,6 +34,8 @@ type Step = "form" | "extracting" | "review";
  */
 export default function MeetingForm({ customers }: { customers: { id: number; company: string }[] }) {
   const [step, setStep] = useState<Step>("form");
+  const [error, setError] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
   const [result, setResult] = useState<MeetingResult | null>(null);
   const [, startTransition] = useTransition();
   const router = useRouter();
@@ -46,23 +54,42 @@ export default function MeetingForm({ customers }: { customers: { id: number; co
   function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!customerName.trim() || (!transcript.trim() && !notes.trim())) return;
+    setError(null);
     setStep("extracting");
+    /* Without this catch a failed extraction (bad API key, quota, network,
+       database error) left the screen on the "Reading the meeting…" animation
+       forever, with the rep's pasted transcript unrecoverable. */
     startTransition(async () => {
-      const res = await logMeetingAction({ customerName: customerName.trim(), date, type, participants, notes, transcript });
-      setResult(res);
-      const init: typeof edited = {};
-      const sel: Record<number, boolean> = {};
-      res.extraction.commitments.forEach((c, i) => {
-        init[i] = { title: c.title, dueInDays: c.due_in_days, owner: c.owner, kind: c.kind };
-        sel[i] = true;
-      });
-      setEdited(init);
-      setSelected(sel);
-      setStep("review");
+      try {
+        const res = await logMeetingAction({ customerName: customerName.trim(), date, type, participants, notes, transcript });
+        setResult(res);
+        const init: typeof edited = {};
+        const sel: Record<number, boolean> = {};
+        res.extraction.commitments.forEach((c, i) => {
+          init[i] = { title: c.title, dueInDays: c.due_in_days, owner: c.owner, kind: c.kind };
+          sel[i] = true;
+        });
+        setEdited(init);
+        setSelected(sel);
+        setStep("review");
+      } catch (err) {
+        // Back to the form with everything the rep typed still in place.
+        setError(err instanceof Error ? err.message : "Could not read that meeting. Try again.");
+        setStep("form");
+      }
     });
   }
 
   async function handleFile(file: File) {
+    if (!TRANSCRIPT_EXT.test(file.name)) {
+      setError(`${file.name} isn't a transcript. Drop a .txt, .vtt, .srt or .md file.`);
+      return;
+    }
+    if (file.size > MAX_TRANSCRIPT_BYTES) {
+      setError(`${file.name} is too large (max 2 MB).`);
+      return;
+    }
+    setError(null);
     setTranscript(await file.text());
   }
 
@@ -157,27 +184,35 @@ export default function MeetingForm({ customers }: { customers: { id: number; co
 
           <div className="mt-4 flex flex-wrap gap-2">
             <button
-              disabled={chosen.length === 0}
-              onClick={() =>
+              disabled={chosen.length === 0 || creating}
+              onClick={() => {
+                setCreating(true);
+                setError(null);
                 startTransition(async () => {
-                  await createExtractedCommitmentsAction({
-                    customerId: result.customerId,
-                    interactionId: result.interactionId,
-                    meetingDate: date,
-                    commitments: chosen.map((i) => ({
-                      owner: edited[i].owner,
-                      kind: edited[i].kind,
-                      title: edited[i].title,
-                      dueInDays: edited[i].dueInDays,
-                    })),
-                  });
+                  try {
+                    await createExtractedCommitmentsAction({
+                      customerId: result.customerId,
+                      interactionId: result.interactionId,
+                      meetingDate: date,
+                      commitments: chosen.map((i) => ({
+                        owner: edited[i].owner,
+                        kind: edited[i].kind,
+                        title: edited[i].title,
+                        dueInDays: edited[i].dueInDays,
+                      })),
+                    });
+                  } catch (err) {
+                    setError(err instanceof Error ? err.message : "Could not create those follow-ups.");
+                    setCreating(false);
+                    return;
+                  }
                   toast(`${chosen.length} follow-up${chosen.length === 1 ? "" : "s"} created`, { tone: "positive" });
                   router.push(`/customers/${result.customerId}`);
-                })
-              }
+                });
+              }}
               className="focus-ring rounded-[7px] bg-brand px-4 py-2 text-[13px] font-medium text-white hover:bg-brand-hover disabled:opacity-40"
             >
-              Create {chosen.length} action{chosen.length === 1 ? "" : "s"}
+              {creating ? "Creating…" : `Create ${chosen.length} action${chosen.length === 1 ? "" : "s"}`}
             </button>
             <button
               onClick={() => router.push(`/customers/${result.customerId}`)}
@@ -186,6 +221,8 @@ export default function MeetingForm({ customers }: { customers: { id: number; co
               Skip and open account
             </button>
           </div>
+
+          {error && <p className="mt-3 text-[12.5px] text-risk">{error}</p>}
         </div>
 
         {/* Everything else the model pulled out. */}
@@ -301,6 +338,13 @@ export default function MeetingForm({ customers }: { customers: { id: number; co
           className="focus-ring w-full resize-y rounded-[7px] border border-line px-2.5 py-2 font-mono text-[12.5px] leading-5 outline-none"
         />
       </Field>
+
+      {error && (
+        <div className="card border-risk-line bg-risk-tint px-3 py-2.5" role="alert">
+          <p className="text-[13px] font-medium text-risk">That didn&apos;t work</p>
+          <p className="t-meta mt-0.5 text-[12.5px]">{error}</p>
+        </div>
+      )}
 
       <div className="flex items-center gap-3 border-t border-line-soft pt-4">
         <button

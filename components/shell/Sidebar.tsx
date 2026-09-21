@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { SignOutButton } from "@clerk/nextjs";
 import { usePathname } from "next/navigation";
 import { useCallback, useState, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
@@ -63,7 +64,13 @@ function subscribe(cb: () => void) {
 const getSnapshot = () => localStorage.getItem(SIDEBAR_KEY) === "collapsed";
 const getServerSnapshot = () => false;
 
-export default function Sidebar({ counts, user }: { counts: NavCounts; user: { name: string; role: string; workspace: string } }) {
+export default function Sidebar({
+  counts,
+  user,
+}: {
+  counts: NavCounts;
+  user: { name: string; role: string; workspace: string; isAdmin: boolean };
+}) {
   const pathname = usePathname();
   const collapsed = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -100,6 +107,10 @@ export default function Sidebar({ counts, user }: { counts: NavCounts; user: { n
         { href: "/analytics", label: "Analytics", icon: <Icon>{I.chart}</Icon>, soon: true },
       ],
     },
+    // Only rendered for admins; the route itself 404s for everyone else.
+    ...(user.isAdmin
+      ? [{ label: "Operations", items: [{ href: "/admin", label: "Admin", icon: <Icon>{I.chart}</Icon> }] }]
+      : []),
   ];
 
   const isActive = (href: string) => (href === "/" ? pathname === "/" : pathname.startsWith(href));
@@ -175,6 +186,13 @@ export default function Sidebar({ counts, user }: { counts: NavCounts; user: { n
             </span>
           )}
         </Link>
+        <div className={`mt-1 flex ${collapsed ? "justify-center" : "px-2"}`}>
+          <SignOutButton>
+            <button className="focus-ring rounded-[7px] px-1 py-1 text-[12px] text-ink-3 transition-colors hover:text-ink-2">
+              {collapsed ? "\u21AA" : "Sign out"}
+            </button>
+          </SignOutButton>
+        </div>
         <button
           onClick={toggle}
           className="focus-ring mt-1 hidden w-full items-center gap-2.5 rounded-[7px] px-2 py-1.5 text-[12px] text-ink-3 transition-colors hover:bg-sunken hover:text-ink-2 lg:flex"

@@ -2,6 +2,7 @@ import db from "@/lib/db";
 import type { CommitmentKind, CommitmentOwner, CommitmentView, PriorityBand } from "@/lib/types";
 import { addDays, today } from "@/lib/dates";
 import { rescoreOpportunity } from "@/lib/repo/opportunities";
+import { currentWorkspaceId } from "@/lib/repo/workspace";
 
 // A follow-up IS a commitment with owner='me'. Keeping them in one table is
 // deliberate: two tables would let "I owe them a proposal" and "follow up about
@@ -106,8 +107,8 @@ export interface CommitmentFilter {
 }
 
 export async function listCommitments(f: CommitmentFilter = {}): Promise<CommitmentView[]> {
-  const where: string[] = [];
-  const params: unknown[] = [];
+  const where: string[] = ["c.workspace_id = ?"];
+  const params: unknown[] = [await currentWorkspaceId()];
   const t = today();
 
   if (f.owner) {
@@ -176,14 +177,16 @@ export async function listCommitments(f: CommitmentFilter = {}): Promise<Commitm
 }
 
 export async function getCommitment(id: number): Promise<CommitmentView | null> {
-  const row = await db.get(`${VIEW_SQL} WHERE cm.id = ?`, id);
+  const row = await db.get(`${VIEW_SQL} WHERE cm.id = ? AND c.workspace_id = ?`, id, await currentWorkspaceId());
   return row ? decorate(row) : null;
 }
 
 export async function listCommitmentsForCustomer(customerId: number): Promise<CommitmentView[]> {
   const rows = await db.all(
-    `${VIEW_SQL} WHERE cm.customer_id = ? ORDER BY (cm.status = 'done'), cm.due_date`,
+    `${VIEW_SQL} WHERE cm.customer_id = ? AND c.workspace_id = ?
+     ORDER BY (cm.status = 'done'), cm.due_date`,
     customerId,
+    await currentWorkspaceId(),
   );
   return rows.map(decorate);
 }
@@ -203,9 +206,10 @@ export async function priorityFeed(limit = 8): Promise<FeedItem[]> {
   const t = today();
   const rows = await db.all(
     `${VIEW_SQL}
-       WHERE cm.owner = 'me' AND cm.status = 'open'
+       WHERE c.workspace_id = ? AND cm.owner = 'me' AND cm.status = 'open'
          AND (cm.snoozed_until IS NULL OR cm.snoozed_until <= ?)
        ORDER BY (cm.due_date <= ?) DESC, COALESCE(o.priority_score,0) DESC, cm.due_date ASC`,
+    await currentWorkspaceId(),
     t,
     t,
   );
@@ -231,18 +235,41 @@ export interface Counts {
 
 export async function headlineCounts(): Promise<Counts> {
   const t = today();
+  const ws = await currentWorkspaceId();
   const n = async (sql: string, ...p: unknown[]) => (await db.get<{ n: number }>(sql, ...p))?.n ?? 0;
 
   const [todayActions, overdue, atRisk, hot, waitingOnYou] = await Promise.all([
-    n("SELECT COUNT(*)::int n FROM commitments WHERE owner='me' AND status='open' AND due_date <= ?", t),
-    n("SELECT COUNT(*)::int n FROM commitments WHERE owner='me' AND status='open' AND due_date < ?", t),
-    n("SELECT COUNT(*)::int n FROM opportunities WHERE stage NOT IN ('won','lost') AND jsonb_array_length(risk_reasons) >= 2"),
+    n(
+      `SELECT COUNT(*)::int n FROM commitments cm JOIN customers c ON c.id = cm.customer_id
+       WHERE c.workspace_id = ? AND cm.owner='me' AND cm.status='open' AND cm.due_date <= ?`,
+      ws,
+      t,
+    ),
+    n(
+      `SELECT COUNT(*)::int n FROM commitments cm JOIN customers c ON c.id = cm.customer_id
+       WHERE c.workspace_id = ? AND cm.owner='me' AND cm.status='open' AND cm.due_date < ?`,
+      ws,
+      t,
+    ),
+    n(
+      `SELECT COUNT(*)::int n FROM opportunities o JOIN customers c ON c.id = o.customer_id
+       WHERE c.workspace_id = ? AND o.stage NOT IN ('won','lost')
+         AND jsonb_array_length(o.risk_reasons) >= 2`,
+      ws,
+    ),
     n(
       `SELECT COUNT(DISTINCT o.id)::int n FROM opportunities o
+       JOIN customers c ON c.id = o.customer_id
        JOIN signals s ON s.opportunity_id = o.id AND s.kind='buying' AND s.resolved_at IS NULL
-       WHERE o.stage NOT IN ('won','lost')`,
+       WHERE c.workspace_id = ? AND o.stage NOT IN ('won','lost')`,
+      ws,
     ),
-    n(`SELECT COUNT(DISTINCT customer_id)::int n FROM signals WHERE kind='question' AND resolved_at IS NULL`),
+    n(
+      `SELECT COUNT(DISTINCT s.customer_id)::int n FROM signals s
+       JOIN customers c ON c.id = s.customer_id
+       WHERE c.workspace_id = ? AND s.kind='question' AND s.resolved_at IS NULL`,
+      ws,
+    ),
   ]);
 
   return { todayActions, overdue, atRisk, hot, waitingOnYou };
@@ -260,6 +287,13 @@ export async function createCommitment(input: {
   dueDate: string;
   source?: "ai_extracted" | "manual";
 }): Promise<number> {
+  const owner = await db.get<{ id: number }>(
+    "SELECT id FROM customers WHERE id = ? AND workspace_id = ?",
+    input.customerId,
+    await currentWorkspaceId(),
+  );
+  if (!owner) throw new Error("Customer not found");
+
   const id = await db.insert(
     `INSERT INTO commitments
        (customer_id, opportunity_id, contact_id, interaction_id, owner, kind, title, detail, due_date, source)
@@ -280,44 +314,56 @@ export async function createCommitment(input: {
   return id;
 }
 
-async function opportunityOf(id: number): Promise<number | null> {
+/**
+ * Resolves the parent opportunity, but only for a commitment inside the
+ * caller's workspace. Every mutation below gates on `owns` so a guessed id
+ * from another tenant updates nothing instead of silently succeeding.
+ */
+async function ownership(id: number): Promise<{ owns: boolean; opportunityId: number | null }> {
   const row = await db.get<{ opportunity_id: number | null }>(
-    "SELECT opportunity_id FROM commitments WHERE id = ?",
+    `SELECT cm.opportunity_id FROM commitments cm JOIN customers c ON c.id = cm.customer_id
+     WHERE cm.id = ? AND c.workspace_id = ?`,
     id,
+    await currentWorkspaceId(),
   );
-  return row?.opportunity_id ?? null;
+  return { owns: Boolean(row), opportunityId: row?.opportunity_id ?? null };
 }
 
 /** Matches the timestamp shape the SQLite build wrote, so stored values stay comparable. */
 const NOW_TEXT = `to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD HH24:MI:SS')`;
 
 export async function completeCommitment(id: number) {
+  const { owns, opportunityId } = await ownership(id);
+  if (!owns) return;
   await db.run(`UPDATE commitments SET status='done', completed_at=${NOW_TEXT} WHERE id = ?`, id);
-  const opp = await opportunityOf(id);
-  if (opp) await rescoreOpportunity(opp);
+  if (opportunityId) await rescoreOpportunity(opportunityId);
 }
 
 export async function reopenCommitment(id: number) {
+  const { owns, opportunityId } = await ownership(id);
+  if (!owns) return;
   await db.run("UPDATE commitments SET status='open', completed_at=NULL WHERE id = ?", id);
-  const opp = await opportunityOf(id);
-  if (opp) await rescoreOpportunity(opp);
+  if (opportunityId) await rescoreOpportunity(opportunityId);
 }
 
 export async function snoozeCommitment(id: number, days: number) {
+  const { owns, opportunityId } = await ownership(id);
+  if (!owns) return;
   const next = addDays(today(), days);
   await db.run("UPDATE commitments SET due_date=?, snoozed_until=?, status='open' WHERE id = ?", next, next, id);
-  const opp = await opportunityOf(id);
-  if (opp) await rescoreOpportunity(opp);
+  if (opportunityId) await rescoreOpportunity(opportunityId);
 }
 
 export async function rescheduleCommitment(id: number, date: string) {
+  const { owns, opportunityId } = await ownership(id);
+  if (!owns) return;
   await db.run("UPDATE commitments SET due_date=?, snoozed_until=NULL WHERE id = ?", date, id);
-  const opp = await opportunityOf(id);
-  if (opp) await rescoreOpportunity(opp);
+  if (opportunityId) await rescoreOpportunity(opportunityId);
 }
 
 export async function deleteCommitment(id: number) {
-  const opp = await opportunityOf(id);
+  const { owns, opportunityId } = await ownership(id);
+  if (!owns) return;
   await db.run("DELETE FROM commitments WHERE id = ?", id);
-  if (opp) await rescoreOpportunity(opp);
+  if (opportunityId) await rescoreOpportunity(opportunityId);
 }

@@ -25,6 +25,17 @@ CREATE TABLE IF NOT EXISTS users (
   email TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'Account Executive',
   initials TEXT NOT NULL DEFAULT '',
+  -- Set once Clerk is wired up; null for the seeded demo user.
+  clerk_user_id TEXT UNIQUE,
+  is_admin SMALLINT NOT NULL DEFAULT 0,
+  -- Bring-your-own AI key. Ciphertext only (see lib/crypto.ts) — the
+  -- plaintext must never be stored, logged, or returned to a browser.
+  -- ai_key_hint is the masked form that IS safe to display.
+  ai_key_provider TEXT,
+  ai_key_ciphertext TEXT,
+  ai_key_hint TEXT,
+  ai_key_updated_at TIMESTAMPTZ,
+  last_active_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -133,6 +144,18 @@ CREATE TABLE IF NOT EXISTS generated_messages (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+/* Additive migrations for databases created before these columns existed.
+   CREATE TABLE IF NOT EXISTS is a no-op on an existing table, so new columns
+   have to be added explicitly. All are idempotent and safe to re-run. */
+ALTER TABLE users ADD COLUMN IF NOT EXISTS clerk_user_id TEXT UNIQUE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin SMALLINT NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS ai_key_provider TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS ai_key_ciphertext TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS ai_key_hint TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS ai_key_updated_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_active_at TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS idx_users_clerk ON users(clerk_user_id);
 CREATE INDEX IF NOT EXISTS idx_commitments_due ON commitments(status, due_date);
 CREATE INDEX IF NOT EXISTS idx_commitments_customer ON commitments(customer_id);
 CREATE INDEX IF NOT EXISTS idx_interactions_customer ON interactions(customer_id, occurred_at DESC);

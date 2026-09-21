@@ -57,7 +57,7 @@ export default async function FollowUpsPage(props: PageProps<"/followups">) {
         subtitle={`${pluralize(items.length, "follow-up")} in this view. Everything you owe a customer, ranked by what it costs you to miss.`}
       />
 
-      <Tabs tabs={TABS.map((t) => ({ ...t, count: counts[t.key] ?? 0 }))} />
+      <Tabs tabs={TABS.map((t) => ({ ...t, count: counts[t.key] ?? 0 }))} defaultTab="today" />
       <Filters customers={customers} />
 
       {items.length > 0 ? (
