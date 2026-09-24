@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getInteraction, signalsForInteraction } from "@/lib/repo/interactions";
 import { listCommitmentsForCustomer } from "@/lib/repo/commitments";
+import { currentDay } from "@/lib/repo/workspace";
 import { PageHeader, Badge, AiMark, SectionTitle } from "@/components/ui";
 import CommitmentList from "@/components/commitments/CommitmentList";
 import { formatDay, relativePast } from "@/lib/dates";
@@ -23,9 +24,10 @@ export default async function MeetingDetail(props: PageProps<"/meetings/[id]">) 
   const meeting = await getInteraction(Number(id));
   if (!meeting) notFound();
 
-  const [signals, customerCommitments] = await Promise.all([
+  const [signals, customerCommitments, t] = await Promise.all([
     signalsForInteraction(meeting.id),
     listCommitmentsForCustomer(meeting.customer_id),
+    currentDay(),
   ]);
   const created = customerCommitments.filter((c) => c.interaction_id === meeting.id);
 
@@ -44,7 +46,7 @@ export default async function MeetingDetail(props: PageProps<"/meetings/[id]">) 
             </Link>
             {" · "}
             {formatDay(meeting.occurred_at, { weekday: "long", month: "long", day: "numeric" })} ·{" "}
-            {relativePast(meeting.occurred_at)}
+            {relativePast(meeting.occurred_at, t)}
           </>
         }
       />

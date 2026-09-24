@@ -1,12 +1,13 @@
 import Link from "next/link";
 import { listMeetings } from "@/lib/repo/interactions";
+import { currentDay } from "@/lib/repo/workspace";
 import { PageHeader, EmptyState, Badge, Avatar, AiMark } from "@/components/ui";
 import { formatDay, relativePast } from "@/lib/dates";
 
 export const dynamic = "force-dynamic";
 
 export default async function MeetingsPage() {
-  const meetings = await listMeetings();
+  const [meetings, t] = await Promise.all([listMeetings(), currentDay()]);
   const totalActions = meetings.reduce((s, m) => s + m.actions_created, 0);
 
   return (
@@ -39,7 +40,7 @@ export default async function MeetingsPage() {
                       </div>
                       <p className="t-meta mt-0.5 text-[12.5px]">
                         {formatDay(m.occurred_at, { weekday: "short", month: "short", day: "numeric" })} ·{" "}
-                        {relativePast(m.occurred_at)}
+                        {relativePast(m.occurred_at, t)}
                       </p>
                     </div>
                   </div>

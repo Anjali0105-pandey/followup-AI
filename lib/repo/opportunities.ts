@@ -3,7 +3,7 @@ import { toOpportunity } from "@/lib/repo/rows";
 import type { Opportunity, Stage } from "@/lib/types";
 import { scoreOpportunity, maxDaysOverdue } from "@/lib/priority";
 import { daysBetween, today } from "@/lib/dates";
-import { currentWorkspaceId } from "@/lib/repo/workspace";
+import { currentDay, currentWorkspaceId } from "@/lib/repo/workspace";
 
 export interface OpportunityView extends Opportunity {
   customer_name: string;
@@ -27,7 +27,7 @@ const VIEW_SQL = `
   LEFT JOIN contacts ct ON ct.id = o.primary_contact_id
 `;
 
-function decorate(r: Record<string, unknown>): OpportunityView {
+function decorate(r: Record<string, unknown>, t: string): OpportunityView {
   const opp = toOpportunity(r);
   const last = (r.last_interaction_at as string | null) ?? null;
   return {
@@ -38,21 +38,23 @@ function decorate(r: Record<string, unknown>): OpportunityView {
     contact_role: (r.contact_role as string | null) ?? null,
     next_action: (r.next_action as string | null) ?? null,
     health: (r.health as string) ?? "healthy",
-    days_inactive: last ? daysBetween(last.slice(0, 10), today()) : null,
+    days_inactive: last ? daysBetween(last.slice(0, 10), t) : null,
   };
 }
 
 export async function listOpportunities(): Promise<OpportunityView[]> {
+  const [t, ws] = await Promise.all([currentDay(), currentWorkspaceId()]);
   const rows = await db.all(
     `${VIEW_SQL} WHERE c.workspace_id = ? ORDER BY o.priority_score DESC, o.value DESC`,
-    await currentWorkspaceId(),
+    ws,
   );
-  return rows.map(decorate);
+  return rows.map((r) => decorate(r, t));
 }
 
 export async function getOpportunity(id: number): Promise<OpportunityView | null> {
-  const row = await db.get(`${VIEW_SQL} WHERE o.id = ? AND c.workspace_id = ?`, id, await currentWorkspaceId());
-  return row ? decorate(row) : null;
+  const [t, ws] = await Promise.all([currentDay(), currentWorkspaceId()]);
+  const row = await db.get(`${VIEW_SQL} WHERE o.id = ? AND c.workspace_id = ?`, id, ws);
+  return row ? decorate(row, t) : null;
 }
 
 const STAGE_PROBABILITY: Record<Stage, number> = {
@@ -104,7 +106,7 @@ async function pipelineMedian(workspaceId?: number): Promise<number> {
  * interaction, commitment change, stage move) — never on page load, so list
  * screens stay a pure read of cached columns.
  */
-export async function rescoreOpportunity(id: number, median?: number, workspaceId?: number) {
+export async function rescoreOpportunity(id: number, median?: number, workspaceId?: number, day?: string) {
   const opp = await db.get(
     `SELECT o.* FROM opportunities o JOIN customers c ON c.id = o.customer_id
      WHERE o.id = ? AND c.workspace_id = ?`,
@@ -114,7 +116,9 @@ export async function rescoreOpportunity(id: number, median?: number, workspaceI
   if (!opp) return;
   const stage = opp.stage as Stage;
 
-  const t = today();
+  /* The seed runs from the CLI with no session, so it passes the day in; every
+     other caller gets the signed-in rep's own day. */
+  const t = day ?? (workspaceId ? today() : await currentDay());
   const openMine = await db.all<{ due_date: string }>(
     `SELECT due_date FROM commitments
      WHERE opportunity_id = ? AND owner = 'me' AND status IN ('open','snoozed')`,
@@ -149,7 +153,7 @@ export async function rescoreOpportunity(id: number, median?: number, workspaceI
     pipelineMedian: median ?? (await pipelineMedian(workspaceId)),
     stage,
     probability: opp.probability as number,
-    daysOverdue: maxDaysOverdue(openMine.map((c) => c.due_date)),
+    daysOverdue: maxDaysOverdue(openMine.map((c) => c.due_date), t),
     dueToday: openMine.some((c) => c.due_date === t),
     daysSinceInteraction: lastInteraction ? daysBetween(lastInteraction.slice(0, 10), t) : null,
     buyingSignals: byKind.buying ?? 0,
@@ -194,7 +198,8 @@ export async function rescoreAll(workspaceId?: number) {
      WHERE c.workspace_id = ?`,
     ws,
   );
-  for (const { id } of ids) await rescoreOpportunity(id, median, ws);
+  const day = workspaceId ? today() : await currentDay();
+  for (const { id } of ids) await rescoreOpportunity(id, median, ws, day);
 }
 
 /** The opportunity a commitment or interaction should attach to by default. */
@@ -207,4 +212,123 @@ export async function primaryOpportunityFor(customerId: number): Promise<number 
     await currentWorkspaceId(),
   );
   return row?.id ?? null;
+}
+
+/* ---------- Mutations ----------
+   Opportunities were previously created by the seed script alone. Without one,
+   an account has no value, no stage and no priority score, its commitments link
+   to nothing, and it is invisible to every Insight lens — all of which join
+   opportunities. So this is what makes a self-created account real. */
+
+export interface OpportunityFields {
+  name: string;
+  value: number;
+  stage: Stage;
+  expectedCloseDate?: string | null;
+  primaryContactId?: number | null;
+}
+
+/** True when the contact belongs to this customer — a contact from another
+    account must not become its primary. */
+async function contactBelongsTo(customerId: number, contactId: number): Promise<boolean> {
+  const row = await db.get<{ id: number }>(
+    `SELECT ct.id FROM contacts ct JOIN customers c ON c.id = ct.customer_id
+     WHERE ct.id = ? AND ct.customer_id = ? AND c.workspace_id = ?`,
+    contactId,
+    customerId,
+    await currentWorkspaceId(),
+  );
+  return Boolean(row);
+}
+
+export async function createOpportunity(
+  customerId: number,
+  fields: OpportunityFields,
+): Promise<number | null> {
+  const owner = await db.get<{ id: number }>(
+    "SELECT id FROM customers WHERE id = ? AND workspace_id = ?",
+    customerId,
+    await currentWorkspaceId(),
+  );
+  if (!owner) return null;
+
+  const contactId =
+    fields.primaryContactId && (await contactBelongsTo(customerId, fields.primaryContactId))
+      ? fields.primaryContactId
+      : null;
+
+  const id = await db.insert(
+    `INSERT INTO opportunities
+       (customer_id, name, value, stage, probability, expected_close_date, primary_contact_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+    customerId,
+    fields.name,
+    fields.value,
+    fields.stage,
+    // Probability is derived from the stage, exactly as a drag across the
+    // kanban does it, so the two paths can never disagree.
+    STAGE_PROBABILITY[fields.stage],
+    fields.expectedCloseDate ?? null,
+    contactId,
+  );
+
+  // A new opportunity changes the account's priority and health immediately.
+  await rescoreOpportunity(id);
+  return id;
+}
+
+export async function updateOpportunity(id: number, fields: OpportunityFields): Promise<boolean> {
+  const existing = await db.get<{ customer_id: number }>(
+    `SELECT o.customer_id FROM opportunities o JOIN customers c ON c.id = o.customer_id
+     WHERE o.id = ? AND c.workspace_id = ?`,
+    id,
+    await currentWorkspaceId(),
+  );
+  if (!existing) return false;
+
+  const contactId =
+    fields.primaryContactId && (await contactBelongsTo(existing.customer_id, fields.primaryContactId))
+      ? fields.primaryContactId
+      : null;
+
+  await db.run(
+    `UPDATE opportunities
+     SET name = ?, value = ?, stage = ?, probability = ?, expected_close_date = ?,
+         primary_contact_id = ?, updated_at = now()
+     WHERE id = ?`,
+    fields.name,
+    fields.value,
+    fields.stage,
+    STAGE_PROBABILITY[fields.stage],
+    fields.expectedCloseDate ?? null,
+    contactId,
+    id,
+  );
+
+  await rescoreOpportunity(id);
+  return true;
+}
+
+export async function deleteOpportunity(id: number): Promise<boolean> {
+  const existing = await db.get<{ customer_id: number }>(
+    `SELECT o.customer_id FROM opportunities o JOIN customers c ON c.id = o.customer_id
+     WHERE o.id = ? AND c.workspace_id = ?`,
+    id,
+    await currentWorkspaceId(),
+  );
+  if (!existing) return false;
+
+  await db.run("DELETE FROM opportunities WHERE id = ?", id);
+
+  /* Health is a projection of an opportunity's risk half, so with this one gone
+     the account has to be re-derived from whatever remains — otherwise it keeps
+     the "at risk" pill of a deal that no longer exists. */
+  const remaining = await db.get<{ id: number }>(
+    "SELECT id FROM opportunities WHERE customer_id = ? ORDER BY value DESC LIMIT 1",
+    existing.customer_id,
+  );
+  if (remaining) await rescoreOpportunity(remaining.id);
+  else await db.run("UPDATE customers SET health = 'healthy' WHERE id = ?", existing.customer_id);
+
+  return true;
 }

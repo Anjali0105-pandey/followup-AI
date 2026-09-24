@@ -1,4 +1,5 @@
 import { listCommitments } from "@/lib/repo/commitments";
+import { currentDay } from "@/lib/repo/workspace";
 import { PageHeader, EmptyState, AiMark } from "@/components/ui";
 import CommitmentList from "@/components/commitments/CommitmentList";
 import { Tabs } from "@/components/commitments/FilterBar";
@@ -15,15 +16,17 @@ export default async function CommitmentsPage(props: PageProps<"/commitments">) 
   const sp = await props.searchParams;
   const tab = ((Array.isArray(sp.tab) ? sp.tab[0] : sp.tab) as string) ?? "owed";
 
-  const [mine, theirs, done] = await Promise.all([
+  const [mine, theirs, done, t] = await Promise.all([
     listCommitments({ owner: "me", tab: "open" }),
     listCommitments({ owner: "customer", tab: "open" }),
     listCommitments({ tab: "completed" }),
+    currentDay(),
   ]);
 
   const active = tab === "theirs" ? theirs : tab === "done" ? done : mine;
 
-  const overdueMine = mine.filter((c) => c.due_date < new Date().toISOString().slice(0, 10)).length;
+  // The rep's day, not the server's UTC day.
+  const overdueMine = mine.filter((c) => c.due_date < t).length;
 
   return (
     <>

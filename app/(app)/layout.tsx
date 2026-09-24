@@ -3,6 +3,7 @@ import { auth } from "@clerk/nextjs/server";
 import Sidebar from "@/components/shell/Sidebar";
 import TopBar from "@/components/shell/TopBar";
 import GoToShortcuts from "@/components/shell/GoToShortcuts";
+import TimeZoneSync from "@/components/shell/TimeZoneSync";
 import { ToastProvider } from "@/components/shell/Toast";
 import { GeneratorProvider } from "@/components/generator/GeneratorProvider";
 import { currentUser, navCounts, touchLastActive } from "@/lib/repo/workspace";
@@ -29,6 +30,7 @@ export default async function AppLayout({ children }: LayoutProps<"/">) {
     <ToastProvider>
       <GeneratorProvider>
         <GoToShortcuts />
+        <TimeZoneSync current={user.timeZone} />
         <div className="flex min-h-dvh">
           <Sidebar
             counts={counts}

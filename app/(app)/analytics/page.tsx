@@ -3,8 +3,8 @@ import { PageHeader } from "@/components/ui";
 import { listOpportunities } from "@/lib/repo/opportunities";
 import { STAGES, STAGE_LABEL } from "@/lib/types";
 import { money, moneyShort } from "@/lib/format";
-import { today } from "@/lib/dates";
-import { currentWorkspaceId } from "@/lib/repo/workspace";
+
+import { currentDay, currentWorkspaceId } from "@/lib/repo/workspace";
 
 export const dynamic = "force-dynamic";
 
@@ -17,7 +17,7 @@ export default async function AnalyticsPage() {
   // these three counted every tenant's rows, so "commitments kept" and
   // "activity by channel" were whole-database figures rather than this
   // workspace's — wrong numbers *and* a cross-tenant disclosure.
-  const ws = await currentWorkspaceId();
+  const [ws, t] = await Promise.all([currentWorkspaceId(), currentDay()]);
   const [opportunities, keptRow, missedRow, byChannel] = await Promise.all([
     listOpportunities(),
     db.get<{ n: number }>(
@@ -29,7 +29,7 @@ export default async function AnalyticsPage() {
       `SELECT COUNT(*)::int n FROM commitments cm JOIN customers c ON c.id = cm.customer_id
        WHERE c.workspace_id = ? AND cm.owner='me' AND cm.status IN ('open','snoozed') AND cm.due_date < ?`,
       ws,
-      today(),
+      t,
     ),
     db.all<{ type: string; n: number }>(
       `SELECT i.type, COUNT(*)::int n FROM interactions i JOIN customers c ON c.id = i.customer_id

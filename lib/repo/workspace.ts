@@ -23,6 +23,8 @@ export interface SessionUser {
   email: string;
   workspace: string;
   isAdmin: boolean;
+  /** IANA zone the browser last reported, or null before it has. */
+  timeZone: string | null;
 }
 
 function initialsOf(name: string): string {
@@ -41,11 +43,12 @@ interface UserRow {
   role: string;
   email: string;
   is_admin: number;
+  timezone: string | null;
   workspace: string;
 }
 
 const SELECT_USER = `
-  SELECT u.id, u.workspace_id, u.name, u.role, u.email, u.is_admin, w.name AS workspace
+  SELECT u.id, u.workspace_id, u.name, u.role, u.email, u.is_admin, u.timezone, w.name AS workspace
   FROM users u JOIN workspaces w ON w.id = u.workspace_id
 `;
 
@@ -93,8 +96,36 @@ export const currentUser = cache(async function currentUser(): Promise<SessionUs
     email: row.email,
     workspace: row.workspace,
     isAdmin: row.is_admin === 1,
+    timeZone: row.timezone,
   };
 });
+
+/**
+ * Today, in the signed-in user's own timezone.
+ *
+ * Every server-side date decision goes through this rather than `today()`:
+ * which follow-ups are due, what counts as overdue, which tab a row lands in.
+ * The server runs UTC on Vercel, so calling bare `today()` there put a rep in
+ * IST on the wrong day for the first 5.5 hours of theirs — an item due today
+ * reading as "Tomorrow", and overdue counts a day short.
+ *
+ * cache() collapses this to one lookup per request, and a user who has not
+ * reported a zone yet gets the server's own day, which is the previous
+ * behaviour rather than a new failure mode.
+ */
+export const currentDay = cache(async function currentDay(): Promise<string> {
+  const { timeZone } = await currentUser();
+  return today(timeZone ?? undefined);
+});
+
+/**
+ * Records the zone the browser reported. Written only when it actually
+ * changes, so a rep reloading all day costs no writes — and a rep who flies
+ * somewhere gets their dates corrected on the next page load.
+ */
+export async function setUserTimeZone(userId: number, timeZone: string): Promise<void> {
+  await db.run("UPDATE users SET timezone = ? WHERE id = ? AND timezone IS DISTINCT FROM ?", timeZone, userId, timeZone);
+}
 
 /**
  * The tenant boundary. Every repo query filters on this rather than taking a
@@ -159,8 +190,7 @@ export async function touchLastActive(userId: number): Promise<void> {
 }
 
 export async function navCounts() {
-  const t = today();
-  const { workspaceId } = await currentUser();
+  const [t, { workspaceId }] = await Promise.all([currentDay(), currentUser()]);
   // Postgres returns COUNT() as bigint, which the driver hands back as a
   // string — the ::int casts keep these numbers.
   const n = async (sql: string, ...p: unknown[]) => (await db.get<{ n: number }>(sql, ...p))?.n ?? 0;

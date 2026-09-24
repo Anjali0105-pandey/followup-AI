@@ -7,8 +7,8 @@ import { listCommitments, priorityFeed } from "@/lib/repo/commitments";
 import { computeInsights } from "@/lib/repo/insights";
 import { getCustomer, getCustomerByName, listInteractions, listSignals } from "@/lib/repo/customers";
 import { moneyShort } from "@/lib/format";
-import { relativeDue, relativePast, today } from "@/lib/dates";
-import { currentUser, currentWorkspaceId } from "@/lib/repo/workspace";
+import { relativeDue, relativePast } from "@/lib/dates";
+import { currentDay, currentUser, currentWorkspaceId } from "@/lib/repo/workspace";
 import { getDecryptedApiKeyForServerUse } from "@/lib/repo/credentials";
 
 /** The asking user's own key, when they have supplied one. */
@@ -28,7 +28,7 @@ type Handler = (q: string) => Promise<AskResult | null>;
 
 const has = (q: string, ...words: string[]) => words.some((w) => q.includes(w));
 
-function commitmentItems(rows: CommitmentView[]): AskResultItem[] {
+function commitmentItems(rows: CommitmentView[], t: string): AskResultItem[] {
   return rows.map((c) => ({
     title: c.title,
     subtitle: `${c.company}${c.opportunity_value ? ` · ${moneyShort(c.opportunity_value)}` : ""}`,
@@ -36,8 +36,8 @@ function commitmentItems(rows: CommitmentView[]): AskResultItem[] {
     href: `/customers/${c.customer_id}`,
     customerId: c.customer_id,
     commitmentId: c.id,
-    badge: relativeDue(c.due_date),
-    tone: c.due_date < today() ? "risk" : "neutral",
+    badge: relativeDue(c.due_date, t),
+    tone: c.due_date < t ? "risk" : "neutral",
   }));
 }
 
@@ -45,13 +45,13 @@ const HANDLERS: Handler[] = [
   // "Who should I follow up with today?"
   async (q) => {
     if (!has(q, "follow up", "followup", "who should i", "what should i do", "priorit", "today")) return null;
-    const rows = await listCommitments({ owner: "me", tab: "today" });
+    const [rows, t] = await Promise.all([listCommitments({ owner: "me", tab: "today" }), currentDay()]);
     return {
       intent: "today",
       answer: rows.length
         ? `${rows.length} follow-up${rows.length === 1 ? "" : "s"} need you today. Highest priority first.`
         : "Nothing is due today. You're clear.",
-      items: commitmentItems(rows).slice(0, 8),
+      items: commitmentItems(rows, t).slice(0, 8),
     };
   },
 
@@ -81,13 +81,16 @@ const HANDLERS: Handler[] = [
   async (q) => {
     if (!has(q, "promise", "owe", "commit")) return null;
     const customer = await findCustomer(q);
-    const rows = await listCommitments({ owner: "me", customerId: customer?.id, tab: "open" });
+    const [rows, t] = await Promise.all([
+      listCommitments({ owner: "me", customerId: customer?.id, tab: "open" }),
+      currentDay(),
+    ]);
     return {
       intent: "commitments",
       answer: rows.length
         ? `You owe ${customer ? customer.company : "customers"} ${rows.length} thing${rows.length === 1 ? "" : "s"}.`
         : `Nothing outstanding${customer ? ` for ${customer.company}` : ""}.`,
-      items: commitmentItems(rows).slice(0, 8),
+      items: commitmentItems(rows, t).slice(0, 8),
     };
   },
 
@@ -128,6 +131,7 @@ const HANDLERS: Handler[] = [
     }
     const days = daysMatch ? parseInt(daysMatch[1], 10) : 0;
 
+    const day = await currentDay();
     const rows = await db.all(
       `SELECT o.id, o.value, o.stage, o.last_interaction_at, c.id AS cid, c.company
        FROM opportunities o JOIN customers c ON c.id = o.customer_id
@@ -148,7 +152,7 @@ const HANDLERS: Handler[] = [
       }${days ? ` with no activity for ${days}+ days` : ""}.`,
       items: rows.map((r) => ({
         title: r.company as string,
-        subtitle: `${moneyShort(r.value as number)} · ${r.stage} · last touch ${relativePast(r.last_interaction_at as string | null)}`,
+        subtitle: `${moneyShort(r.value as number)} · ${r.stage} · last touch ${relativePast(r.last_interaction_at as string | null, day)}`,
         href: `/customers/${r.cid}`,
         tone: "neutral" as const,
       })),
@@ -160,18 +164,19 @@ const HANDLERS: Handler[] = [
     if (!has(q, "prepare", "brief", "prep me", "getting ready")) return null;
     const customer = await findCustomer(q);
     if (!customer) return null;
-    const [allSignals, owed, theirs, recent] = await Promise.all([
+    const [allSignals, owed, theirs, recent, t] = await Promise.all([
       listSignals(customer.id),
       listCommitments({ owner: "me", customerId: customer.id, tab: "open" }),
       listCommitments({ owner: "customer", customerId: customer.id, tab: "open" }),
       listInteractions(customer.id, 1),
+      currentDay(),
     ]);
     const signals = allSignals.filter((s) => !s.resolved_at);
     const last = recent[0];
 
     const lines = [
       customer.ai_summary,
-      last ? `Last touch: ${last.subject} (${relativePast(last.occurred_at)}).` : null,
+      last ? `Last touch: ${last.subject} (${relativePast(last.occurred_at, t)}).` : null,
       owed.length ? `You owe them: ${owed.map((c) => c.title).join(", ")}.` : null,
       theirs.length ? `They owe you: ${theirs.map((c) => c.title).join(", ")}.` : null,
     ].filter(Boolean);
@@ -194,13 +199,16 @@ const HANDLERS: Handler[] = [
   async (q) => {
     if (!has(q, "draft", "write a", "compose")) return null;
     const customer = await findCustomer(q);
-    const rows = await listCommitments({ owner: "me", customerId: customer?.id, tab: "open" });
+    const [rows, t] = await Promise.all([
+      listCommitments({ owner: "me", customerId: customer?.id, tab: "open" }),
+      currentDay(),
+    ]);
     return {
       intent: "draft",
       answer: customer
         ? `Pick what to draft for ${customer.company} — generating from their live context.`
         : "Which follow-up should I draft? Here's what's open.",
-      items: commitmentItems(rows).slice(0, 6),
+      items: commitmentItems(rows, t).slice(0, 6),
     };
   },
 ];
@@ -269,12 +277,12 @@ export async function ask(question: string): Promise<AskResult> {
   }
 
   // No customer identified — answer from the top of the priority feed.
-  const feed = (await priorityFeed(5)).map((f) => f.lead);
+  const [feed, t] = await Promise.all([priorityFeed(5).then((f) => f.map((x) => x.lead)), currentDay()]);
   return {
     intent: "fallback",
     answer:
       "I couldn't match that to a specific customer. Here's what's at the top of your list — or try naming a company.",
-    items: commitmentItems(feed),
+    items: commitmentItems(feed, t),
   };
 }
 

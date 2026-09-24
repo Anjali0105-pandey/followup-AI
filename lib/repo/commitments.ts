@@ -1,8 +1,8 @@
 import db from "@/lib/db";
 import type { CommitmentKind, CommitmentOwner, CommitmentView, PriorityBand } from "@/lib/types";
-import { addDays, today } from "@/lib/dates";
+import { addDays } from "@/lib/dates";
 import { rescoreOpportunity } from "@/lib/repo/opportunities";
-import { currentWorkspaceId } from "@/lib/repo/workspace";
+import { currentDay, currentWorkspaceId } from "@/lib/repo/workspace";
 
 // A follow-up IS a commitment with owner='me'. Keeping them in one table is
 // deliberate: two tables would let "I owe them a proposal" and "follow up about
@@ -109,7 +109,7 @@ export interface CommitmentFilter {
 export async function listCommitments(f: CommitmentFilter = {}): Promise<CommitmentView[]> {
   const where: string[] = ["c.workspace_id = ?"];
   const params: unknown[] = [await currentWorkspaceId()];
-  const t = today();
+  const t = await currentDay();
 
   if (f.owner) {
     where.push("cm.owner = ?");
@@ -203,7 +203,7 @@ export interface FeedItem {
 }
 
 export async function priorityFeed(limit = 8): Promise<FeedItem[]> {
-  const t = today();
+  const t = await currentDay();
   const rows = await db.all(
     `${VIEW_SQL}
        WHERE c.workspace_id = ? AND cm.owner = 'me' AND cm.status = 'open'
@@ -234,7 +234,7 @@ export interface Counts {
 }
 
 export async function headlineCounts(): Promise<Counts> {
-  const t = today();
+  const t = await currentDay();
   const ws = await currentWorkspaceId();
   const n = async (sql: string, ...p: unknown[]) => (await db.get<{ n: number }>(sql, ...p))?.n ?? 0;
 
@@ -349,7 +349,7 @@ export async function reopenCommitment(id: number) {
 export async function snoozeCommitment(id: number, days: number) {
   const { owns, opportunityId } = await ownership(id);
   if (!owns) return;
-  const next = addDays(today(), days);
+  const next = addDays(await currentDay(), days);
   await db.run("UPDATE commitments SET due_date=?, snoozed_until=?, status='open' WHERE id = ?", next, next, id);
   if (opportunityId) await rescoreOpportunity(opportunityId);
 }

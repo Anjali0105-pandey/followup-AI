@@ -172,8 +172,8 @@ function compact(value: number) {
 }
 
 /** Days past due for the most overdue item in a list of due dates. */
-export function maxDaysOverdue(dueDates: string[]): number {
-  const t = today();
+export function maxDaysOverdue(dueDates: string[], reference: string = today()): number {
+  const t = reference;
   let max = 0;
   for (const d of dueDates) {
     const diff = daysBetween(d, t);

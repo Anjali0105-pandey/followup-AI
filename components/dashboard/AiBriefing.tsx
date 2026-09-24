@@ -1,7 +1,7 @@
 import Link from "next/link";
 import type { CommitmentView } from "@/lib/types";
 import { AiMark, PriorityChip } from "@/components/ui";
-import { relativeDue, today } from "@/lib/dates";
+import { relativeDue } from "@/lib/dates";
 import { money, pluralize } from "@/lib/format";
 
 /**
@@ -16,14 +16,17 @@ export default function AiBriefing({
   attentionCount,
   framing,
   actions,
+  today: t,
 }: {
   firstName: string;
   greeting: string;
   attentionCount: number;
   framing: string[];
   actions: CommitmentView[];
+  /* Passed in rather than derived: this renders on the server, where the
+     clock is UTC and would disagree with the rep's own day. */
+  today: string;
 }) {
-  const t = today();
 
   return (
     <section className="ai-briefing anim-rise mb-6 overflow-hidden">
@@ -90,7 +93,7 @@ export default function AiBriefing({
                   <div className="min-w-0">
                     <p className="text-[13.5px] font-medium leading-5">{item.title}</p>
                     <p className={`t-meta mt-0.5 text-[12px] ${overdue ? "text-risk" : ""}`}>
-                      Due {relativeDue(item.due_date).toLowerCase()}
+                      Due {relativeDue(item.due_date, t).toLowerCase()}
                       {item.opportunity_value != null && (
                         <span className="text-ink-3"> · {money(item.opportunity_value)}</span>
                       )}

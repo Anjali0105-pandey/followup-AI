@@ -5,13 +5,27 @@ import db from "@/lib/db";
 import * as C from "@/lib/repo/commitments";
 import * as O from "@/lib/repo/opportunities";
 import * as I from "@/lib/repo/interactions";
-import { createCustomer, getCustomer, getCustomerByName, listContacts, listSignals, updateCustomerFacts } from "@/lib/repo/customers";
-import { currentUser, requireUser } from "@/lib/repo/workspace";
+import {
+  createContact,
+  createCustomer,
+  deleteContact,
+  deleteCustomer,
+  getCustomer,
+  getCustomerByName,
+  listContacts,
+  listSignals,
+  updateContact,
+  updateCustomer,
+  updateCustomerFacts,
+} from "@/lib/repo/customers";
+import type { ContactFields, CustomerFields } from "@/lib/repo/customers";
+import type { OpportunityFields } from "@/lib/repo/opportunities";
+import { currentDay, currentUser, requireUser, setUserTimeZone } from "@/lib/repo/workspace";
 import { assertAdmin } from "@/lib/repo/admin";
 import { checkRateLimit } from "@/lib/ratelimit";
 import { clearUserApiKey, getDecryptedApiKeyForServerUse, getKeyInfo, setUserApiKey } from "@/lib/repo/credentials";
 import type { AiProvider, StoredKeyInfo } from "@/lib/repo/credentials";
-import { addDays, today } from "@/lib/dates";
+import { addDays } from "@/lib/dates";
 import { generateMessage, extractMeeting, refineMessage } from "@/lib/ai";
 import type { MessageChannel, MeetingExtraction } from "@/lib/ai";
 import type { CommitmentKind, Stage } from "@/lib/types";
@@ -282,7 +296,7 @@ export async function markSentAction(input: {
     opportunityId: await O.primaryOpportunityFor(customer.id),
     type: channel === "call_script" ? "call" : channel,
     direction: "outbound",
-    occurredAt: today(),
+    occurredAt: await currentDay(),
     subject: subjectLine ?? `Follow-up sent via ${channel}`,
     body: input.body,
   });
@@ -419,6 +433,153 @@ export async function askAction(question: string): Promise<AskResult> {
   checkRateLimit("ask", user.id);
   if (question.length > 2000) throw new Error("That question is too long.");
   return runAsk(question);
+}
+
+/* ---------- Accounts, contacts and opportunities ---------- */
+
+/** Trims to null so an empty optional field is stored as NULL, not "". */
+function optional(value: string | null | undefined, max = 200): string | null {
+  const trimmed = (value ?? "").trim();
+  if (!trimmed) return null;
+  if (trimmed.length > max) throw new Error("That value is too long.");
+  return trimmed;
+}
+
+function required(value: string, field: string, max = 200): string {
+  const trimmed = value.trim();
+  if (!trimmed) throw new Error(`${field} is required.`);
+  if (trimmed.length > max) throw new Error(`${field} is too long.`);
+  return trimmed;
+}
+
+function customerFields(input: CustomerFields): CustomerFields {
+  return {
+    company: required(input.company, "Company"),
+    // A person's name is optional in the form; the company stands in, because
+    // every screen labels an account by its company.
+    name: optional(input.name) ?? required(input.company, "Company"),
+    industry: optional(input.industry),
+    website: optional(input.website),
+    segment: optional(input.segment),
+  };
+}
+
+export async function createCustomerAction(input: CustomerFields): Promise<number> {
+  await requireUser();
+  const fields = customerFields(input);
+  // Reuse an existing account rather than silently creating a duplicate — the
+  // same normalised match the meeting flow uses.
+  const existing = await getCustomerByName(fields.company);
+  if (existing) throw new Error(`${existing.company} already exists in this workspace.`);
+  const id = await createCustomer(fields);
+  refresh("/customers");
+  return id;
+}
+
+export async function updateCustomerAction(id: number, input: CustomerFields) {
+  await requireUser();
+  const ok = await updateCustomer(id, customerFields(input));
+  if (!ok) throw new Error("Customer not found");
+  refresh("/customers");
+}
+
+export async function deleteCustomerAction(id: number) {
+  await requireUser();
+  const ok = await deleteCustomer(id);
+  if (!ok) throw new Error("Customer not found");
+  refresh("/customers");
+}
+
+function contactFields(input: ContactFields): ContactFields {
+  return {
+    name: required(input.name, "Name"),
+    role: optional(input.role),
+    email: optional(input.email),
+    phone: optional(input.phone, 40),
+    isDecisionMaker: Boolean(input.isDecisionMaker),
+    isChampion: Boolean(input.isChampion),
+    notes: optional(input.notes, 1000),
+  };
+}
+
+export async function createContactAction(customerId: number, input: ContactFields) {
+  await requireUser();
+  const id = await createContact(customerId, contactFields(input));
+  if (id == null) throw new Error("Customer not found");
+  refresh();
+}
+
+export async function updateContactAction(id: number, input: ContactFields) {
+  await requireUser();
+  const ok = await updateContact(id, contactFields(input));
+  if (!ok) throw new Error("Contact not found");
+  refresh();
+}
+
+export async function deleteContactAction(id: number) {
+  await requireUser();
+  const ok = await deleteContact(id);
+  if (!ok) throw new Error("Contact not found");
+  refresh();
+}
+
+function opportunityFields(input: OpportunityFields): OpportunityFields {
+  if (!STAGES.includes(input.stage)) throw new Error("Unknown stage.");
+  if (!Number.isFinite(input.value) || input.value < 0 || input.value > 1e12) {
+    throw new Error("Enter a deal value between 0 and 1,000,000,000,000.");
+  }
+  if (input.expectedCloseDate) assertDay(input.expectedCloseDate, "expected close date");
+  return {
+    name: required(input.name, "Deal name"),
+    value: Math.round(input.value * 100) / 100,
+    stage: input.stage,
+    expectedCloseDate: input.expectedCloseDate || null,
+    primaryContactId: input.primaryContactId ?? null,
+  };
+}
+
+export async function createOpportunityAction(customerId: number, input: OpportunityFields) {
+  await requireUser();
+  const id = await O.createOpportunity(customerId, opportunityFields(input));
+  if (id == null) throw new Error("Customer not found");
+  refresh("/opportunities");
+}
+
+export async function updateOpportunityAction(id: number, input: OpportunityFields) {
+  await requireUser();
+  const ok = await O.updateOpportunity(id, opportunityFields(input));
+  if (!ok) throw new Error("Opportunity not found");
+  refresh("/opportunities");
+}
+
+export async function deleteOpportunityAction(id: number) {
+  await requireUser();
+  const ok = await O.deleteOpportunity(id);
+  if (!ok) throw new Error("Opportunity not found");
+  refresh("/opportunities");
+}
+
+/* ---------- Session preferences ---------- */
+
+/**
+ * Records the rep's timezone, as detected by their browser.
+ *
+ * Validated against the runtime's own list rather than trusted: this value
+ * reaches Intl.DateTimeFormat on every subsequent request, and an arbitrary
+ * string from a client has no business getting there.
+ */
+export async function reportTimeZoneAction(timeZone: string): Promise<void> {
+  const user = await requireUser();
+  if (typeof timeZone !== "string" || timeZone.length > 64) throw new Error("Invalid timezone.");
+  // Intl throws on an unknown zone, which is the cheapest correct validation.
+  try {
+    new Intl.DateTimeFormat("en-CA", { timeZone });
+  } catch {
+    throw new Error("Unknown timezone.");
+  }
+  await setUserTimeZone(user.id, timeZone);
+  // Every screen's dates depend on this, so the shell has to re-render.
+  refresh();
 }
 
 /* ---------- AI credentials ---------- */

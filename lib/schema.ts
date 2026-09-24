@@ -36,6 +36,11 @@ CREATE TABLE IF NOT EXISTS users (
   ai_key_hint TEXT,
   ai_key_updated_at TIMESTAMPTZ,
   last_active_at TIMESTAMPTZ,
+  -- IANA zone, e.g. 'Asia/Kolkata'. Reported by the browser on sign-in.
+  -- "Today" is a per-user question: the server runs UTC, so without this a
+  -- rep in IST sees the wrong day's work list for the first 5.5 hours of
+  -- theirs. Null means "not reported yet" and falls back to server-local.
+  timezone TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -154,6 +159,7 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS ai_key_ciphertext TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS ai_key_hint TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS ai_key_updated_at TIMESTAMPTZ;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS last_active_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS timezone TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_users_clerk ON users(clerk_user_id);
 CREATE INDEX IF NOT EXISTS idx_commitments_due ON commitments(status, due_date);

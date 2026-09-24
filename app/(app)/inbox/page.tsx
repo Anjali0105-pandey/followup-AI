@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { PageHeader, Badge, AiMark, EmptyState } from "@/components/ui";
 import db from "@/lib/db";
-import { currentWorkspaceId } from "@/lib/repo/workspace";
+import { currentDay, currentWorkspaceId } from "@/lib/repo/workspace";
 import { relativePast } from "@/lib/dates";
 
 export const dynamic = "force-dynamic";
@@ -24,6 +24,7 @@ export default async function InboxPage() {
      ORDER BY i.occurred_at DESC`,
     await currentWorkspaceId(),
   );
+  const t = await currentDay();
 
   return (
     <>
@@ -67,7 +68,7 @@ export default async function InboxPage() {
                     <span className="t-h2">{m.company as string}</span>
                     <Badge>{m.type as string}</Badge>
                   </div>
-                  <span className="t-meta text-[12px]">{relativePast(m.occurred_at as string)}</span>
+                  <span className="t-meta text-[12px]">{relativePast(m.occurred_at as string, t)}</span>
                 </div>
                 <p className="mt-1 text-[13.5px] font-medium">{m.subject as string}</p>
                 {(m.body as string) && <p className="t-meta mt-1 text-[13px] leading-5">{m.body as string}</p>}

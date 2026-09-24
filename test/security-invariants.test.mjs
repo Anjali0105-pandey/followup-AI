@@ -188,7 +188,53 @@ test("SQL written directly in a page component filters on workspace_id", () => {
 });
 
 /* ============================================================
-   3. The whole-database seed is unreachable from the application.
+   3. Server code resolves "today" in the rep's timezone, not the server's.
+
+   `today()` reads the runtime's own clock. In a browser that is correct — it is
+   the user's clock. On a server it is whatever the host runs, which on Vercel
+   is UTC, so a rep in IST spent the first 5.5 hours of every day looking at
+   yesterday's work list: items due today reading as "Tomorrow", overdue counts
+   a day short, nav badges disagreeing with the dates beside them.
+
+   Everything under app/ runs on the server (client components live in
+   components/), so the rule there is absolute and needs no exceptions.
+   ============================================================ */
+
+test("no server code under app/ derives the day from the server clock", () => {
+  const files = [...walk("app", /\.tsx?$/)];
+  assert.ok(files.length > 0, "found no app files to check — has the directory moved?");
+
+  const offenders = [];
+  for (const file of files) {
+    const src = read(file);
+    // `currentDay()` is the session-aware replacement; `today(` and a raw
+    // toISOString day slice are both the server's own clock.
+    if (/\btoday\(/.test(src)) offenders.push(`${file} — calls today()`);
+    if (/new Date\(\)\.toISOString\(\)\.slice\(0, ?10\)/.test(src)) {
+      offenders.push(`${file} — slices a UTC ISO string for the day`);
+    }
+  }
+
+  assert.deepEqual(
+    offenders,
+    [],
+    `Server code must use currentDay(), which resolves the signed-in rep's own day:\n  ${offenders.join("\n  ")}`,
+  );
+});
+
+test("the date helpers and session expose a timezone-aware day", () => {
+  const dates = read("lib/dates.ts");
+  assert.match(dates, /export function today\(timeZone\?: string\)/, "today() must accept a timezone");
+  assert.match(dates, /timeZone,/, "today() must pass the zone to Intl");
+
+  const workspace = read("lib/repo/workspace.ts");
+  assert.match(workspace, /export const currentDay = cache\(/, "currentDay() must exist and be request-cached");
+  assert.match(workspace, /timeZone: string \| null/, "the session must carry the user's timezone");
+  assert.match(read("lib/schema.ts"), /ADD COLUMN IF NOT EXISTS timezone TEXT/, "the column needs an idempotent migration");
+});
+
+/* ============================================================
+   4. The whole-database seed is unreachable from the application.
 
    seed() TRUNCATEs every table, users and workspaces included, so it destroys
    every tenant and every stored API key. The Settings "Reset demo data" button

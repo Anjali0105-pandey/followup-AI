@@ -2,13 +2,13 @@ import Link from "next/link";
 import { headlineCounts, listCommitments, priorityFeed } from "@/lib/repo/commitments";
 import { computeInsights } from "@/lib/repo/insights";
 import { listOpportunities } from "@/lib/repo/opportunities";
-import { currentUser } from "@/lib/repo/workspace";
+import { currentDay, currentUser } from "@/lib/repo/workspace";
 import { SectionTitle, EmptyState, Badge, AiMark } from "@/components/ui";
 import PriorityFeed from "@/components/feed/PriorityFeed";
 import AiBriefing from "@/components/dashboard/AiBriefing";
 import KpiCard, { type KpiTrend } from "@/components/dashboard/KpiCard";
 import { moneyShort } from "@/lib/format";
-import { daysBetween, relativeDue, relativePast, today } from "@/lib/dates";
+import { daysBetween, relativeDue, relativePast } from "@/lib/dates";
 import { pluralize } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
@@ -43,11 +43,11 @@ const INSIGHT_TONE: Record<string, "risk" | "attention" | "positive" | "ai"> = {
 };
 
 export default async function CommandCenter() {
-  const t = today();
-
   // One round of parallel reads rather than ten sequential trips to Neon.
-  const [user, counts, feed, insights, opportunities, upcoming, waiting, todayItems, overdueItems] =
+  // `t` is the rep's own day, not the server's — see currentDay().
+  const [t, user, counts, feed, insights, opportunities, upcoming, waiting, todayItems, overdueItems] =
     await Promise.all([
+      currentDay(),
       currentUser(),
       headlineCounts(),
       priorityFeed(8),
@@ -119,6 +119,7 @@ export default async function CommandCenter() {
         attentionCount={counts.todayActions}
         framing={framing}
         actions={feed.slice(0, 3).map((f) => f.lead)}
+        today={t}
       />
 
       <div className="mb-8 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
@@ -224,7 +225,7 @@ export default async function CommandCenter() {
               <Link key={c.id} href={`/customers/${c.customer_id}`} className="block rounded-[7px] px-2 py-2 transition-colors hover:bg-sunken">
                 <p className="truncate text-[13px] font-medium">{c.title}</p>
                 <p className="t-meta truncate text-[12px]">
-                  {c.company} · {relativeDue(c.due_date)}
+                  {c.company} · {relativeDue(c.due_date, t)}
                 </p>
               </Link>
             ))}
@@ -235,7 +236,7 @@ export default async function CommandCenter() {
               <Link key={c.id} href={`/customers/${c.customer_id}`} className="block rounded-[7px] px-2 py-2 transition-colors hover:bg-sunken">
                 <p className="truncate text-[13px] font-medium">{c.title}</p>
                 <p className="t-meta truncate text-[12px]">
-                  {c.company} · {relativeDue(c.due_date)}
+                  {c.company} · {relativeDue(c.due_date, t)}
                 </p>
               </Link>
             ))}
@@ -249,7 +250,7 @@ export default async function CommandCenter() {
                     <span className="truncate text-[13px] font-medium">{o.company}</span>
                     <Badge tone="positive">{moneyShort(o.value)}</Badge>
                   </div>
-                  <p className="t-meta text-[12px]">Closed {relativePast(o.last_interaction_at)}</p>
+                  <p className="t-meta text-[12px]">Closed {relativePast(o.last_interaction_at, t)}</p>
                 </Link>
               ))}
             </Panel>

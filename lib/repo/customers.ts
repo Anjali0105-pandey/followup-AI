@@ -129,14 +129,21 @@ export async function listSignals(customerId: number): Promise<Signal[]> {
 export async function createCustomer(input: {
   name: string;
   company: string;
+  industry?: string | null;
+  website?: string | null;
+  segment?: string | null;
   workspaceId?: number;
 }): Promise<number> {
   const ws = input.workspaceId ?? (await currentWorkspaceId());
   return db.insert(
-    "INSERT INTO customers (workspace_id, name, company) VALUES (?, ?, ?) RETURNING id",
+    `INSERT INTO customers (workspace_id, name, company, industry, website, segment)
+     VALUES (?, ?, ?, ?, ?, ?) RETURNING id`,
     ws,
     input.name,
     input.company,
+    input.industry ?? null,
+    input.website ?? null,
+    input.segment ?? null,
   );
 }
 
@@ -158,4 +165,111 @@ export async function updateCustomerFacts(
     customerId,
     await currentWorkspaceId(),
   );
+}
+
+/* ---------- Mutations ----------
+   Until these existed, an account could only come into being as a side effect
+   of logging a meeting, and contacts were created by the seed script alone. A
+   self-created account therefore had nobody to address and no opportunity, so
+   it had no priority score and never appeared in any Insight lens — a
+   second-class citizen that could never reach parity with a seeded one.
+
+   Every function re-reads ownership from the session's workspace rather than
+   trusting the id it was handed. */
+
+export interface CustomerFields {
+  name: string;
+  company: string;
+  industry?: string | null;
+  website?: string | null;
+  segment?: string | null;
+}
+
+export async function updateCustomer(id: number, fields: CustomerFields): Promise<boolean> {
+  const rows = await db.run(
+    `UPDATE customers
+     SET name = ?, company = ?, industry = ?, website = ?, segment = ?, updated_at = now()
+     WHERE id = ? AND workspace_id = ?`,
+    fields.name,
+    fields.company,
+    fields.industry ?? null,
+    fields.website ?? null,
+    fields.segment ?? null,
+    id,
+    await currentWorkspaceId(),
+  );
+  return rows > 0;
+}
+
+/** Cascades to contacts, opportunities, interactions, signals and commitments. */
+export async function deleteCustomer(id: number): Promise<boolean> {
+  const rows = await db.run(
+    "DELETE FROM customers WHERE id = ? AND workspace_id = ?",
+    id,
+    await currentWorkspaceId(),
+  );
+  return rows > 0;
+}
+
+export interface ContactFields {
+  name: string;
+  role?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  isDecisionMaker?: boolean;
+  isChampion?: boolean;
+  notes?: string | null;
+}
+
+export async function createContact(customerId: number, fields: ContactFields): Promise<number | null> {
+  const owner = await db.get<{ id: number }>(
+    "SELECT id FROM customers WHERE id = ? AND workspace_id = ?",
+    customerId,
+    await currentWorkspaceId(),
+  );
+  if (!owner) return null;
+
+  return db.insert(
+    `INSERT INTO contacts (customer_id, name, role, email, phone, is_decision_maker, is_champion, notes)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+    customerId,
+    fields.name,
+    fields.role ?? null,
+    fields.email ?? null,
+    fields.phone ?? null,
+    fields.isDecisionMaker ? 1 : 0,
+    fields.isChampion ? 1 : 0,
+    fields.notes ?? null,
+  );
+}
+
+/** Contacts have no workspace_id of their own, so ownership comes via the parent. */
+const CONTACT_IN_WORKSPACE = `
+  id IN (SELECT ct.id FROM contacts ct JOIN customers c ON c.id = ct.customer_id
+         WHERE ct.id = ? AND c.workspace_id = ?)
+`;
+
+export async function updateContact(id: number, fields: ContactFields): Promise<boolean> {
+  const ws = await currentWorkspaceId();
+  const rows = await db.run(
+    `UPDATE contacts
+     SET name = ?, role = ?, email = ?, phone = ?, is_decision_maker = ?, is_champion = ?, notes = ?
+     WHERE ${CONTACT_IN_WORKSPACE}`,
+    fields.name,
+    fields.role ?? null,
+    fields.email ?? null,
+    fields.phone ?? null,
+    fields.isDecisionMaker ? 1 : 0,
+    fields.isChampion ? 1 : 0,
+    fields.notes ?? null,
+    id,
+    ws,
+  );
+  return rows > 0;
+}
+
+export async function deleteContact(id: number): Promise<boolean> {
+  const ws = await currentWorkspaceId();
+  const rows = await db.run(`DELETE FROM contacts WHERE ${CONTACT_IN_WORKSPACE}`, id, ws);
+  return rows > 0;
 }

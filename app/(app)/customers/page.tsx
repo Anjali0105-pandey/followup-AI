@@ -1,6 +1,8 @@
 import Link from "next/link";
 import { listCustomers } from "@/lib/repo/customers";
-import { PageHeader, PriorityChip, HealthPill, Avatar, Badge } from "@/components/ui";
+import { currentDay } from "@/lib/repo/workspace";
+import { PageHeader, PriorityChip, HealthPill, Avatar, Badge, EmptyState } from "@/components/ui";
+import CustomerForm from "@/components/customer/CustomerForm";
 import { money } from "@/lib/format";
 import { relativeDue, relativePast } from "@/lib/dates";
 import type { PriorityBand, Stage } from "@/lib/types";
@@ -12,7 +14,7 @@ export default async function CustomersPage(props: PageProps<"/customers">) {
   const sp = await props.searchParams;
   const q = ((Array.isArray(sp.q) ? sp.q[0] : sp.q) as string | undefined)?.toLowerCase() ?? "";
 
-  const all = await listCustomers();
+  const [all, t] = await Promise.all([listCustomers(), currentDay()]);
   const customers = q
     ? all.filter((c) => `${c.company} ${c.name} ${c.industry ?? ""}`.toLowerCase().includes(q))
     : all;
@@ -25,18 +27,35 @@ export default async function CustomersPage(props: PageProps<"/customers">) {
         title="Customers"
         subtitle={`${customers.length} accounts · ${money(totalOpen)} in open pipeline`}
         actions={
-          <form className="contents">
-            <input
-              name="q"
-              defaultValue={q}
-              placeholder="Search accounts…"
-              className="focus-ring h-8 w-56 rounded-[7px] border border-line bg-card px-2.5 text-[13px] outline-none placeholder:text-ink-3"
-            />
-          </form>
+          <>
+            <form className="contents">
+              <input
+                name="q"
+                defaultValue={q}
+                aria-label="Search accounts"
+                placeholder="Search accounts…"
+                className="focus-ring h-8 w-56 rounded-[7px] border border-line bg-card px-2.5 text-[13px] outline-none placeholder:text-ink-3"
+              />
+            </form>
+            <CustomerForm />
+          </>
         }
       />
 
-      <div className="card overflow-hidden">
+      {customers.length === 0 && (
+        <EmptyState
+          title={q ? `No accounts match "${q}"` : "No accounts yet"}
+          body={
+            q
+              ? "Try a different search, or add the account."
+              : "Add one by hand, or log a meeting and the account is created for you."
+          }
+        >
+          <CustomerForm />
+        </EmptyState>
+      )}
+
+      <div className={`card overflow-hidden ${customers.length === 0 ? "hidden" : ""}`}>
         <div className="hidden grid-cols-[minmax(0,2.2fr)_minmax(0,1.4fr)_110px_110px_120px_130px] gap-3 border-b border-line bg-sunken/50 px-4 py-2 lg:grid">
           <span className="t-label">Account</span>
           <span className="t-label">Decision maker</span>
@@ -88,11 +107,11 @@ export default async function CustomersPage(props: PageProps<"/customers">) {
                   )}
                 </span>
 
-                <span className="t-meta text-[12.5px]">{relativePast(c.last_interaction_at)}</span>
+                <span className="t-meta text-[12.5px]">{relativePast(c.last_interaction_at, t)}</span>
 
                 <div className="flex items-center gap-2">
                   <PriorityChip band={c.priority_band as PriorityBand} score={c.priority_score} />
-                  {c.next_due && <span className="t-meta text-[12px]">{relativeDue(c.next_due)}</span>}
+                  {c.next_due && <span className="t-meta text-[12px]">{relativeDue(c.next_due, t)}</span>}
                 </div>
               </Link>
             </li>

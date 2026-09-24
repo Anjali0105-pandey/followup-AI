@@ -1,8 +1,8 @@
 import db from "@/lib/db";
 import type { InsightCategory, InsightItem } from "@/lib/types";
-import { daysBetween, today } from "@/lib/dates";
+import { daysBetween } from "@/lib/dates";
 import { moneyShort } from "@/lib/format";
-import { currentWorkspaceId } from "@/lib/repo/workspace";
+import { currentDay, currentWorkspaceId } from "@/lib/repo/workspace";
 
 // Insights are a *lens*, not a table: every category is a query over data that
 // already exists, computed in one pass on read. Nothing here calls the AI —
@@ -26,9 +26,9 @@ function rows(sql: string, ...params: unknown[]) {
   return db.all<Base & Record<string, unknown>>(sql, ...params);
 }
 
-function inactiveDays(r: Record<string, unknown>): number | null {
+function inactiveDays(r: Record<string, unknown>, reference: string): number | null {
   const last = r.last_interaction_at as string | null;
-  return last ? daysBetween(last.slice(0, 10), today()) : null;
+  return last ? daysBetween(last.slice(0, 10), reference) : null;
 }
 
 /** jsonb columns arrive decoded; older text rows are still parsed defensively. */
@@ -46,8 +46,7 @@ function strings(value: unknown): string[] {
 }
 
 export async function computeInsights(): Promise<Record<InsightCategory, InsightItem[]>> {
-  const t = today();
-  const ws = await currentWorkspaceId();
+  const [t, ws] = await Promise.all([currentDay(), currentWorkspaceId()]);
   const out: Record<InsightCategory, InsightItem[]> = {
     hot: [],
     at_risk: [],
@@ -156,7 +155,7 @@ export async function computeInsights(): Promise<Record<InsightCategory, Insight
       why: [
         `${r.buying} active buying signal${(r.buying as number) === 1 ? "" : "s"}`,
         `${r.probability}% probability at ${r.stage} stage`,
-        inactiveDays(r) != null ? `Last touch ${inactiveDays(r)} days ago` : "No interactions logged",
+        inactiveDays(r, t) != null ? `Last touch ${inactiveDays(r, t)} days ago` : "No interactions logged",
       ],
       recommendation: "Push for a decision date while intent is high.",
       severity: "info",
@@ -182,7 +181,7 @@ export async function computeInsights(): Promise<Record<InsightCategory, Insight
   // `julianday()` has no Postgres equivalent; subtracting two dates yields the
   // integer day gap directly.
   for (const r of goingColdRows) {
-    const d = inactiveDays(r)!;
+    const d = inactiveDays(r, t)!;
     out.going_cold.push({
       category: "going_cold",
       ...pick(r),

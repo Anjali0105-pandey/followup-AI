@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
 import { getAdminOverview } from "@/lib/repo/admin";
-import { currentUser } from "@/lib/repo/workspace";
+import { currentDay, currentUser } from "@/lib/repo/workspace";
 import { PageHeader, Badge, MetricCard, EmptyState } from "@/components/ui";
 import { moneyShort } from "@/lib/format";
 import { relativePast } from "@/lib/dates";
@@ -13,7 +13,7 @@ export default async function AdminPage() {
   // route exists.
   if (!user.isAdmin) notFound();
 
-  const { totals, users } = await getAdminOverview();
+  const [{ totals, users }, t] = await Promise.all([getAdminOverview(), currentDay()]);
 
   return (
     <>
@@ -65,7 +65,7 @@ export default async function AdminPage() {
                   <Td>{u.workspace}</Td>
                   <Td>
                     <span className={u.lastActiveAt ? "" : "text-ink-3"}>
-                      {u.lastActiveAt ? relativePast(u.lastActiveAt) : "Never"}
+                      {u.lastActiveAt ? relativePast(u.lastActiveAt, t) : "Never"}
                     </span>
                   </Td>
                   <Td align="right">{u.customers}</Td>

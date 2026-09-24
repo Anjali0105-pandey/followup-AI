@@ -8,12 +8,16 @@ import {
   listSignals,
 } from "@/lib/repo/customers";
 import { listCommitmentsForCustomer } from "@/lib/repo/commitments";
+import { currentDay } from "@/lib/repo/workspace";
 import { Avatar, Badge, HealthPill, PriorityChip, SectionTitle, StageBadge, AiMark, EmptyState } from "@/components/ui";
 import CustomerTabs from "@/components/customer/CustomerTabs";
 import CustomerActions from "@/components/customer/CustomerActions";
 import Timeline from "@/components/customer/Timeline";
 import SignalList from "@/components/customer/SignalList";
 import AddFollowUp from "@/components/customer/AddFollowUp";
+import CustomerForm from "@/components/customer/CustomerForm";
+import ContactForm from "@/components/customer/ContactForm";
+import OpportunityForm from "@/components/customer/OpportunityForm";
 import CommitmentList from "@/components/commitments/CommitmentList";
 import { money } from "@/lib/format";
 import { relativeDue, relativePast } from "@/lib/dates";
@@ -35,12 +39,13 @@ export default async function Customer360(props: PageProps<"/customers/[id]">) {
   const customer = await getCustomer(customerId);
   if (!customer) notFound();
 
-  const [contacts, opportunities, interactions, allSignals, commitments] = await Promise.all([
+  const [contacts, opportunities, interactions, allSignals, commitments, t] = await Promise.all([
     listContacts(customerId),
     listOpportunitiesFor(customerId),
     listInteractions(customerId),
     listSignals(customerId),
     listCommitmentsForCustomer(customerId),
+    currentDay(),
   ]);
   const signals = allSignals.filter((s) => !s.resolved_at);
 
@@ -86,6 +91,17 @@ export default async function Customer360(props: PageProps<"/customers/[id]">) {
 
             <div className="flex flex-col items-end gap-2">
               <div className="flex flex-wrap items-center justify-end gap-2">
+                <CustomerForm
+                  existing={{
+                    id: customer.id,
+                    name: customer.name,
+                    company: customer.company,
+                    industry: customer.industry,
+                    website: customer.website,
+                    segment: customer.segment,
+                  }}
+                  trigger="subtle"
+                />
                 <AddFollowUp customerId={customerId} />
                 <CustomerActions customerId={customerId} />
               </div>
@@ -107,8 +123,8 @@ export default async function Customer360(props: PageProps<"/customers/[id]">) {
               {nextAction ? (
                 <>
                   {nextAction.title}{" "}
-                  <span className={nextAction.due_date < new Date().toISOString().slice(0, 10) ? "text-risk" : "text-ink-3"}>
-                    · {relativeDue(nextAction.due_date)}
+                  <span className={nextAction.due_date < t ? "text-risk" : "text-ink-3"}>
+                    · {relativeDue(nextAction.due_date, t)}
                   </span>
                 </>
               ) : (
@@ -118,7 +134,7 @@ export default async function Customer360(props: PageProps<"/customers/[id]">) {
                 </span>
               )}
             </Fact>
-            <Fact label="Last interaction">{relativePast(interactions[0]?.occurred_at ?? null)}</Fact>
+            <Fact label="Last interaction">{relativePast(interactions[0]?.occurred_at ?? null, t)}</Fact>
             <Fact label="Open commitments">
               {mine.length} yours · {theirs.length} theirs
             </Fact>
@@ -192,44 +208,72 @@ export default async function Customer360(props: PageProps<"/customers/[id]">) {
                     )}
                   </Card>
 
-                  <Card title={`Contacts (${contacts.length})`}>
-                    <ul className="space-y-2.5">
-                      {contacts.map((c) => (
-                        <li key={c.id} className="flex items-start gap-2.5">
-                          <Avatar name={c.name} size={26} />
-                          <div className="min-w-0">
-                            <p className="flex items-center gap-1.5 text-[13px] font-medium">
-                              {c.name}
-                              {c.is_decision_maker && <Badge tone="brand">DM</Badge>}
-                              {c.is_champion && <Badge tone="positive">Champion</Badge>}
-                            </p>
-                            <p className="t-meta truncate text-[12px]">{c.role}</p>
-                            {c.email && (
-                              <a href={`mailto:${c.email}`} className="block truncate text-[12px] text-brand hover:underline">
-                                {c.email}
-                              </a>
-                            )}
-                          </div>
-                        </li>
-                      ))}
-                    </ul>
+                  <Card title={`Contacts (${contacts.length})`} action={<ContactForm customerId={customerId} />}>
+                    {contacts.length === 0 ? (
+                      <p className="t-meta text-[12.5px]">
+                        Nobody recorded yet. Generated follow-ups are addressed to the decision maker, so
+                        adding one makes every draft land on a person instead of a company.
+                      </p>
+                    ) : (
+                      <ul className="space-y-2.5">
+                        {contacts.map((c) => (
+                          <li key={c.id} className="flex items-start gap-2.5">
+                            <Avatar name={c.name} size={26} />
+                            <div className="min-w-0 flex-1">
+                              <p className="flex items-center gap-1.5 text-[13px] font-medium">
+                                {c.name}
+                                {c.is_decision_maker && <Badge tone="brand">DM</Badge>}
+                                {c.is_champion && <Badge tone="positive">Champion</Badge>}
+                              </p>
+                              <p className="t-meta truncate text-[12px]">{c.role}</p>
+                              {c.email && (
+                                <a href={`mailto:${c.email}`} className="block truncate text-[12px] text-brand hover:underline">
+                                  {c.email}
+                                </a>
+                              )}
+                            </div>
+                            <ContactForm customerId={customerId} existing={c} />
+                          </li>
+                        ))}
+                      </ul>
+                    )}
                   </Card>
 
-                  {opportunities.length > 0 && (
-                    <Card title="Opportunities">
+                  <Card
+                    title="Opportunities"
+                    action={
+                      <OpportunityForm
+                        customerId={customerId}
+                        contacts={contacts.map((c) => ({ id: c.id, name: c.name }))}
+                      />
+                    }
+                  >
+                    {opportunities.length === 0 ? (
+                      <p className="t-meta text-[12.5px]">
+                        No deal on this account, so it has no value or stage, carries no priority, and
+                        stays off the pipeline board and out of AI Insights. Adding one fixes all of that.
+                      </p>
+                    ) : (
                       <ul className="space-y-2">
                         {opportunities.map((o) => (
-                          <li key={o.id} className="flex items-center justify-between gap-2">
+                          <li key={o.id} className="flex items-start justify-between gap-2">
                             <div className="min-w-0">
                               <p className="truncate text-[13px]">{o.name}</p>
                               <StageBadge stage={o.stage} />
                             </div>
-                            <span className="tabular shrink-0 text-[13px] font-medium">{money(o.value)}</span>
+                            <span className="flex shrink-0 items-center gap-1.5">
+                              <span className="tabular text-[13px] font-medium">{money(o.value)}</span>
+                              <OpportunityForm
+                                customerId={customerId}
+                                contacts={contacts.map((c) => ({ id: c.id, name: c.name }))}
+                                existing={o}
+                              />
+                            </span>
                           </li>
                         ))}
                       </ul>
-                    </Card>
-                  )}
+                    )}
+                  </Card>
                 </aside>
               </div>
             ),
@@ -273,10 +317,21 @@ function Fact({ label, children }: { label: string; children: React.ReactNode })
   );
 }
 
-function Card({ title, children }: { title: string; children: React.ReactNode }) {
+function Card({
+  title,
+  action,
+  children,
+}: {
+  title: string;
+  action?: React.ReactNode;
+  children: React.ReactNode;
+}) {
   return (
     <div className="card p-4">
-      <h3 className="t-label mb-2.5">{title}</h3>
+      <div className="mb-2.5 flex items-center justify-between gap-2">
+        <h3 className="t-label">{title}</h3>
+        {action}
+      </div>
       {children}
     </div>
   );
